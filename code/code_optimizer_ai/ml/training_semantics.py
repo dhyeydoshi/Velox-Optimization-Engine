@@ -12,7 +12,6 @@ from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 
-
 PRODUCTION_ACTION_TYPES: List[str] = [
     "algorithm_change",
     "data_structure_optimization",
@@ -41,10 +40,8 @@ PRODUCTION_ACTION_TYPES: List[str] = [
     "no_change",
 ]
 
-
 def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(maximum, float(value)))
-
 
 def normalize_objective_weights(
     objective_weights: Optional[Dict[str, float]],
@@ -64,12 +61,10 @@ def normalize_objective_weights(
         return {"runtime": 0.5, "memory": 0.5}
     return {"runtime": runtime / total, "memory": memory / total}
 
-
 def weighted_score(runtime_delta_pct: float, memory_delta_pct: float, weights: Dict[str, float]) -> float:
     runtime_score = float(runtime_delta_pct) / 100.0
     memory_score = float(memory_delta_pct) / 100.0
     return runtime_score * float(weights["runtime"]) + memory_score * float(weights["memory"])
-
 
 def build_optimizer_state_vector(
     *,

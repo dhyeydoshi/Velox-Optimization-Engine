@@ -42,10 +42,7 @@ class Settings(BaseSettings):
         default="code_optimizer_ai",
         validation_alias="REDIS_KEY_PREFIX",
     )
-    INFLUXDB_URL: str = Field(
-        default="http://localhost:8086",
-        validation_alias="INFLUXDB_URL"
-    )
+    
     
     # LLM Configuration
     OPENAI_API_KEY: Optional[str] = Field(default=None, validation_alias="OPENAI_API_KEY")

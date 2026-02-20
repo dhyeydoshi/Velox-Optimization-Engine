@@ -13,7 +13,6 @@ from code.code_optimizer_ai.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
 @dataclass
 class OptimizationRecord:
     id: Optional[int] = None
@@ -31,7 +30,6 @@ class OptimizationRecord:
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
-
 @dataclass
 class TrainingEpisode:
     id: Optional[int] = None
@@ -40,7 +38,6 @@ class TrainingEpisode:
     success: bool = False
     episode_length: int = 0
     created_at: Optional[datetime] = None
-
 
 @dataclass
 class KnowledgePattern:
@@ -53,7 +50,6 @@ class KnowledgePattern:
     usage_count: int = 0
     last_used: Optional[datetime] = None
     created_at: Optional[datetime] = None
-
 
 class DatabaseManager:
 
@@ -225,7 +221,6 @@ class DatabaseManager:
             return episode_id
     
     async def get_knowledge_patterns(self, code_context: str) -> List[Dict]:
-        """Get applicable knowledge patterns"""
         self._require_pool()
         async with self.connection_pool.acquire() as conn:
             query = """
@@ -269,7 +264,6 @@ class DatabaseManager:
         if self.connection_pool:
             await self.connection_pool.close()
             self._initialized = False
-
 
 class CacheManager:
     
@@ -368,11 +362,9 @@ class CacheManager:
             self.redis_client = None
             self._initialized = False
 
-
 # Global instances
 db_manager = DatabaseManager()
 cache_manager = CacheManager()
-
 
 @asynccontextmanager
 async def get_db_connection():
@@ -384,7 +376,6 @@ async def get_db_connection():
         logger.error(f"Database operation failed: {e}")
         raise
 
-
 @asynccontextmanager
 async def get_redis_connection():
     if not cache_manager._initialized:
@@ -395,11 +386,9 @@ async def get_redis_connection():
         logger.error(f"Redis operation failed: {e}")
         raise
 
-
 # Utility functions
 def generate_code_hash(code: str) -> str:
     return hashlib.sha256(code.encode()).hexdigest()
-
 
 async def store_optimization_experience(code: str, file_path: str, optimization_result: Dict) -> int:
     code_hash = generate_code_hash(code)
@@ -432,7 +421,6 @@ async def store_optimization_experience(code: str, file_path: str, optimization_
     await cache_manager.cache_optimization_pattern(code_hash, pattern_data)
     
     return record_id
-
 
 async def retrieve_optimization_knowledge(code_context: str) -> Optional[Dict]:
     code_hash = generate_code_hash(code_context)

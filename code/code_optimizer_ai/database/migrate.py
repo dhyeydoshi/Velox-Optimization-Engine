@@ -13,7 +13,6 @@ from code.code_optimizer_ai.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
 async def create_database_schema():
     db_manager = DatabaseManager()
     
@@ -51,9 +50,7 @@ async def create_database_schema():
     finally:
         await db_manager.close()
 
-
 async def check_database_connection():
-    """Check if database connection is working"""
     try:
         db_manager = DatabaseManager()
         await db_manager.initialize()
@@ -64,10 +61,7 @@ async def check_database_connection():
         logger.error(f"Database connection test failed: {e}")
         return False
 
-
 async def seed_sample_data():
-    """Seed database with sample optimization data"""
-    from datetime import datetime
     from code.code_optimizer_ai.database.connection import OptimizationRecord
     
     db_manager = DatabaseManager()
@@ -130,9 +124,7 @@ async def seed_sample_data():
     finally:
         await db_manager.close()
 
-
 def main():
-    """Main migration function"""
     import argparse
     
     parser = argparse.ArgumentParser(description="Database migration script")
@@ -166,7 +158,6 @@ def main():
     except Exception as e:
         logger.error(f"Migration failed: {e}")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

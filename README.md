@@ -130,102 +130,195 @@ code/code_optimizer_ai/
   run.sh                     # Shell runtime entry
 ```
 
-## Setup (Local)
+## Quick Start
 
-### Prerequisites
-- Python 3.12+
-- PostgreSQL
-- Redis
-- Optional local LLM: Ollama
+### 1. Installation
 
-### 1) Create environment and install dependencies
 ```powershell
-python -m venv .venv
-. .venv\Scripts\Activate.ps1
+# Clone and setup
+git clone <repository-url>
+cd CodeOptimizer
+python -m venv venv
+.\venv\Scripts\Activate.ps1  # Windows
+# or: source venv/bin/activate  # Linux/macOS
+
+# Install dependencies
 pip install -r code/code_optimizer_ai/requirements.txt
+
+# Configure environment
+cp code/code_optimizer_ai/.env.example code/code_optimizer_ai/.env
+# Edit .env with your configuration
 ```
 
-### 2) Configure environment file
-Settings load from:
-- `code/code_optimizer_ai/.env`
+### 2. Setup Services
 
-Use:
-- `code/code_optimizer_ai/.env.example` as template.
+**PostgreSQL:**
+```sql
+CREATE DATABASE code_optimizer;
+CREATE USER code_optimizer_user WITH PASSWORD 'your_password';
+GRANT ALL PRIVILEGES ON DATABASE code_optimizer TO code_optimizer_user;
+```
 
-Important required values:
-- `APP_NAME`
-- `APP_VERSION`
-- `SECRET_KEY`
-- `DATABASE_URL`
-- `REDIS_URL`
+**Redis:**
+```bash
+redis-server --daemonize yes
+```
 
-Recommended security values:
-- `REQUIRE_AUTH_TOKEN=True`
-- `API_AUTH_TOKEN=<strong token>`
-- `ENABLE_API_DOCS=False`
+**Initialize Database:**
+```bash
+python -c "import asyncio, sys; from pathlib import Path; sys.path.insert(0, '.'); from code.code_optimizer_ai.database.migrate import create_database_schema; asyncio.run(create_database_schema())"
+```
 
-### 3) Run API
-```powershell
+### 3. Configure LLM (Choose One)
+
+**Option A: OpenRouter (Recommended)**
+```bash
+# Get API key from https://openrouter.ai/
+# Add to .env:
+OPENROUTER_API_KEY=sk-or-v1-xxxxx
+OPENROUTER_PRIMARY_MODEL=anthropic/claude-sonnet-4.5
+```
+
+**Option B: Local Ollama (Free)**
+```bash
+# Install Ollama from https://ollama.ai/
+ollama run qwen3-coder
+# Add to .env:
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3-coder
+```
+
+### 4. Train Model
+
+```bash
+# Generate training data (50k transitions)
+python code/code_optimizer_ai/generate_training_data.py \
+    --output-jsonl data/training/pretrain_transitions.jsonl \
+    --synthetic-samples 50000 \
+    --seed 42
+
+# Train DQN model (40 epochs, ~30 minutes)
+python code/code_optimizer_ai/pretrain_dqn.py \
+    --train data/training/pretrain_transitions.jsonl \
+    --output models/rl_policy/dqn_model.pth \
+    --epochs 40 \
+    --steps-per-epoch 1000 \
+    --shuffle \
+    --fresh-start
+```
+
+### 5. Run Application
+
+```bash
 python code/code_optimizer_ai/run.py
 ```
 
-or
-
+**Verify:**
 ```bash
-./code/code_optimizer_ai/run.sh
+curl http://localhost:8000/health
 ```
 
-## Training and Model Lifecycle
+### 6. Optimize Code
 
-Primary training path is **offline**.
-
-### CLI path
-1. Generate transitions:
 ```bash
-python code/code_optimizer_ai/generate_training_data.py \
-  --input-dir data/training \
-  --output-jsonl data/training/pretrain_transitions.jsonl \
-  --synthetic-samples 10000 \
-  --seed 42
+curl -X POST http://localhost:8000/optimize \
+    -H "Content-Type: application/json" \
+    -H "X-API-Token: your_token" \
+    -d '{
+        "code": "def fibonacci(n):\n    if n <= 1: return n\n    return fibonacci(n-1) + fibonacci(n-2)",
+        "max_suggestions": 3
+    }'
 ```
 
-2. Pretrain DQN:
-```bash
-python code/code_optimizer_ai/pretrain_dqn.py \
-  --input data/training/pretrain_transitions.jsonl \
-  --output models/rl_policy/dqn_model.pth \
-  --epochs 40 \
-  --steps-per-epoch 1000 \
-  --batch-size 64 \
-  --shuffle \
-  --fresh-start
-```
+** For complete documentation, see [docs/training_runbook.md](docs/training_runbook.md)**
 
-### API path
-- `POST /train` starts job (background or sync).
-- `GET /train/{job_id}` polls status.
-- `GET /train` lists recent jobs.
-
-Training gate behavior:
-- Evaluates candidate model on holdout TD error.
-- Compares against current deployed checkpoint.
-- Publishes only if gate passes; otherwise rejects candidate.
-
-See `docs/training_runbook.md` for operational details.
+---
 
 ## Testing
 
-Run integration tests:
+**Run all tests:**
 ```bash
-pytest code/code_optimizer_ai/tests/test_integration.py -q -p no:cacheprovider
+pytest code/code_optimizer_ai/tests/ -v
 ```
 
-Run selected RL/data tests:
+**Run specific test suites:**
 ```bash
+# Integration tests
+pytest code/code_optimizer_ai/tests/test_integration.py -q
+
+# RL/Training tests
 pytest code/code_optimizer_ai/tests/test_pretrain_dqn.py \
-       code/code_optimizer_ai/tests/test_generate_training_data.py \
-       code/code_optimizer_ai/tests/test_cache_key_prefix.py -q -p no:cacheprovider
+       code/code_optimizer_ai/tests/test_generate_training_data.py -q
+
+# Core components
+pytest code/code_optimizer_ai/tests/test_core_components.py -q
 ```
+
+**Security tests:**
+```bash
+pytest code/code_optimizer_ai/tests/test_security_fixes.py -v
+```
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [training_runbook.md](docs/training_runbook.md) | **Complete operations guide** - setup, training, optimization, troubleshooting |
+| [design_document.md](docs/design_document.md) | Architecture and design decisions |
+| `SECURITY.md` | Security best practices and vulnerability disclosure |
+| API docs | Enable with `ENABLE_API_DOCS=true`, visit `/docs` |
+
+---
+
+## Key Features
+
+###  Intelligent Optimization Strategy
+- **Reinforcement Learning (DQN)** selects best optimization type from 25 categories
+- **LLM semantic analysis** understands code intent and bottlenecks
+- **Multi-objective optimization** balances runtime vs memory tradeoffs
+
+###  Safe Validation
+- **Syntax checking** via AST parsing
+- **Unit test execution** in isolated sandbox
+- **Micro-benchmarking** measures actual performance improvements
+- **Diff generation** shows exact changes
+
+###  Flexible Deployment
+- **Inline code** optimization via API
+- **File-based** optimization for local codebases
+- **GitHub repository** scanning and optimization
+- **Continuous monitoring** with background agents
+
+###  Production-Ready
+- **PostgreSQL** for persistent storage
+- **Redis** for caching and replay buffers
+- **Authentication** and rate limiting
+- **Evaluation gates** prevent bad model deployments
+- **Shadow/active policy** for safe model updates
+
+---
+
+## Architecture Highlights
+
+**Dueling Double DQN:**
+- Separates state value from action advantage
+- Reduces Q-value overestimation bias
+- Soft Polyak target updates (τ=0.005)
+- Huber loss for gradient stability
+
+**Multi-Step Episodes:**
+- Episodes of 3-8 sequential optimizations
+- State evolution mirrors real refactoring workflows
+- Diminishing returns as code quality improves
+
+**Online Learning:**
+- Shadow feedback collection from production
+- Automatic retraining pipeline integration
+- Active/shadow policy promotion based on performance
+
+---
 
 ## Security and Operational Notes
 

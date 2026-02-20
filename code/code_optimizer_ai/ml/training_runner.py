@@ -41,7 +41,6 @@ ACTION_INDEX = {name: idx for idx, name in enumerate(PRODUCTION_ACTION_TYPES)}
 # Lock serialising the publish-to-canonical step across concurrent jobs.
 _publish_lock = threading.Lock()
 
-
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -79,7 +78,6 @@ class TrainingJobStatus:
     dataset_path: Optional[str] = None
     holdout_path: Optional[str] = None
 
-
 @dataclass
 class TrainingConfig:
     """Parameters for a training run."""
@@ -99,7 +97,6 @@ class TrainingConfig:
     max_td_error_regression_pct: float = 10.0  # New model's holdout TD error must not be >10% worse
     require_td_error_improvement: bool = False  # If True, new model must strictly improve
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -110,18 +107,15 @@ def _resolve(path_str: str) -> Path:
         p = (REPO_ROOT / p).resolve()
     return p
 
-
 def _jobs_dir() -> Path:
     d = _resolve(settings.TRAINING_DATA_PATH) / "jobs"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
-
 def _save_status(status: TrainingJobStatus) -> Path:
     path = _jobs_dir() / f"{status.job_id}.json"
     path.write_text(json.dumps(asdict(status), indent=2), encoding="utf-8")
     return path
-
 
 def load_job_status(job_id: str) -> Optional[TrainingJobStatus]:
     path = _jobs_dir() / f"{job_id}.json"
@@ -130,18 +124,15 @@ def load_job_status(job_id: str) -> Optional[TrainingJobStatus]:
     data = json.loads(path.read_text(encoding="utf-8"))
     return TrainingJobStatus(**data)
 
-
 def create_job_id() -> str:
     """Generate a collision-safe job ID (timestamp + random hex)."""
     return f"job_{int(time.time())}_{secrets.token_hex(4)}"
-
 
 def create_job_status(job_id: str) -> TrainingJobStatus:
     """Create and persist an 'initiated' job record. Call before scheduling background work."""
     status = TrainingJobStatus(job_id=job_id, started_at=datetime.now().isoformat())
     _save_status(status)
     return status
-
 
 def list_jobs(limit: int = 20) -> List[Dict[str, Any]]:
     jobs_path = _jobs_dir()
@@ -153,7 +144,6 @@ def list_jobs(limit: int = 20) -> List[Dict[str, Any]]:
         except Exception:
             pass
     return results
-
 
 # ---------------------------------------------------------------------------
 # Dataset split
@@ -179,7 +169,6 @@ def _split_jsonl(
     holdout_out.write_text("\n".join(holdout_lines) + "\n", encoding="utf-8")
     return len(train_lines), len(holdout_lines)
 
-
 # ---------------------------------------------------------------------------
 # Holdout evaluation
 # ---------------------------------------------------------------------------
@@ -189,9 +178,10 @@ def _evaluate_on_holdout(
     holdout_path: Path,
     gamma: float,
 ) -> Dict[str, float]:
-    """Compute mean TD error and mean reward on holdout transitions."""
+    """Compute mean TD error, mean reward, and action accuracy on holdout transitions."""
     td_errors: List[float] = []
     rewards: List[float] = []
+    correct_actions: int = 0
 
     with holdout_path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -209,20 +199,27 @@ def _evaluate_on_holdout(
             next_state_t = torch.FloatTensor(next_state).unsqueeze(0).to(agent.device)
 
             with torch.no_grad():
-                q_current = agent.q_network(state_t)[0, action_idx].item()
-                q_next_max = agent.target_network(next_state_t).max(1)[0].item()
-                target = reward + (gamma * q_next_max * (0.0 if done else 1.0))
+                q_values = agent.q_network(state_t)
+                q_current = q_values[0, action_idx].item()
+                predicted_action = q_values.argmax(1).item()
+                # Double DQN target: online selects, target evaluates
+                best_next = agent.q_network(next_state_t).argmax(1, keepdim=True)
+                q_next = agent.target_network(next_state_t).gather(1, best_next).squeeze(1).item()
+                target = reward + (gamma * q_next * (0.0 if done else 1.0))
                 td_error = abs(q_current - target)
 
             td_errors.append(td_error)
             rewards.append(reward)
+            if predicted_action == action_idx:
+                correct_actions += 1
 
+    count = len(td_errors)
     return {
         "mean_td_error": float(np.mean(td_errors)) if td_errors else float("inf"),
         "mean_reward": float(np.mean(rewards)) if rewards else 0.0,
-        "count": len(td_errors),
+        "action_accuracy": float(correct_actions / count) if count > 0 else 0.0,
+        "count": count,
     }
-
 
 # ---------------------------------------------------------------------------
 # Main training pipeline
@@ -347,6 +344,17 @@ def run_training_job(config: TrainingConfig, job_id: Optional[str] = None) -> Tr
         agent.training_step = 0
         agent.epsilon = agent.epsilon_start
 
+        # Compute per-epoch epsilon decay to reach epsilon_end by final epoch
+        agent.epsilon_decay = (agent.epsilon_end / max(agent.epsilon_start, 1e-8)) ** (
+            1.0 / max(config.epochs, 1)
+        )
+
+        # LR scheduler: cosine annealing from initial LR to 1e-5
+        total_train_steps = config.epochs * config.steps_per_epoch
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            agent.optimizer, T_max=total_train_steps, eta_min=1e-5,
+        )
+
         # Load train split into replay buffer
         train_transitions = _load_transitions_from_jsonl(train_path, reward_clip=config.reward_clip)
         if config.shuffle:
@@ -368,6 +376,7 @@ def run_training_job(config: TrainingConfig, job_id: Optional[str] = None) -> Tr
                 if loss is not None:
                     losses.append(loss)
                     total_updates += 1
+                scheduler.step()
             # Decay epsilon per epoch, not per gradient step.
             if agent.epsilon > agent.epsilon_end:
                 agent.epsilon *= agent.epsilon_decay
@@ -434,6 +443,8 @@ def run_training_job(config: TrainingConfig, job_id: Optional[str] = None) -> Tr
             "evaluation_gate",
             new_td_error=round(new_eval["mean_td_error"], 6),
             prev_td_error=round(prev_eval["mean_td_error"], 6) if prev_eval else None,
+            new_action_accuracy=round(new_eval.get("action_accuracy", 0.0), 4),
+            prev_action_accuracy=round(prev_eval.get("action_accuracy", 0.0), 4) if prev_eval else None,
             passed=gate_passed,
             reason=gate_reason,
         )
@@ -472,7 +483,6 @@ def run_training_job(config: TrainingConfig, job_id: Optional[str] = None) -> Tr
         logger.error("training_job_failed", job_id=job_id, error=str(exc))
         raise
 
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -497,7 +507,6 @@ def _load_transitions_from_jsonl(
             done = bool(record["done"])
             transitions.append((state, action_idx, reward, next_state, done))
     return transitions
-
 
 def _apply_evaluation_gate(
     *,

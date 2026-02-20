@@ -16,7 +16,6 @@ try:
 except ImportError:
     STRUCTLOG_AVAILABLE = False
 
-
 class _KwargLoggerWrapper:
 
     def __init__(self, logger: logging.Logger):
@@ -38,7 +37,6 @@ class _KwargLoggerWrapper:
 
     def debug(self, event: str, **kwargs):
         self._emit("debug", event, **kwargs)
-
 
 def setup_logging():
     log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
@@ -81,7 +79,6 @@ def setup_logging():
             cache_logger_on_first_use=True,
         )
 
-
 def get_logger(name=None):
     """Get a logger for the given module name."""
     if not name:
@@ -91,7 +88,4 @@ def get_logger(name=None):
     if STRUCTLOG_AVAILABLE:
         return structlog.get_logger(name)
     return _KwargLoggerWrapper(logging.getLogger(name))
-
-
-# Initialize logging on module import
 setup_logging()

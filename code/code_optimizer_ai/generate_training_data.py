@@ -37,7 +37,6 @@ ACTION_ALIASES = {
     "data_structure": "data_structure_optimization",
 }
 
-
 @dataclass
 class TransitionRecord:
     state: List[float]
@@ -45,7 +44,6 @@ class TransitionRecord:
     reward: float
     next_state: List[float]
     done: bool
-
 
 @dataclass
 class BuildStats:
@@ -55,7 +53,6 @@ class BuildStats:
     records_skipped: int = 0
     synthetic_records: int = 0
 
-
 def _resolve(path_value: str) -> Path:
     path = Path(path_value)
     if not path.is_absolute():
@@ -64,17 +61,14 @@ def _resolve(path_value: str) -> Path:
         path = path.resolve()
     return path
 
-
 def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(maximum, float(value)))
-
 
 def _to_normalized_complexity(raw: Any) -> float:
     value = float(raw if raw is not None else 0.5)
     if value > 1.0:
         value = value / 100.0
     return _clamp(value)
-
 
 def _to_int_count(raw: Any, default: int = 0) -> int:
     if raw is None:
@@ -83,7 +77,6 @@ def _to_int_count(raw: Any, default: int = 0) -> int:
         return max(0, int(raw))
     except (TypeError, ValueError):
         return default
-
 
 def _to_float(raw: Any) -> Optional[float]:
     if raw is None:
@@ -96,7 +89,6 @@ def _to_float(raw: Any) -> Optional[float]:
         return None
     return value
 
-
 def _extract_nested(record: Dict[str, Any], *keys: str) -> Any:
     current: Any = record
     for key in keys:
@@ -107,7 +99,6 @@ def _extract_nested(record: Dict[str, Any], *keys: str) -> Any:
             return None
     return current
 
-
 def _pct_delta(before: Any, after: Any) -> Optional[float]:
     before_val = _to_float(before)
     after_val = _to_float(after)
@@ -117,7 +108,6 @@ def _pct_delta(before: Any, after: Any) -> Optional[float]:
         return None
     return ((before_val - after_val) / before_val) * 100.0
 
-
 def normalize_action_type(raw_action: str) -> str:
     key = (raw_action or "").strip().lower()
     if not key:
@@ -126,7 +116,6 @@ def normalize_action_type(raw_action: str) -> str:
     if normalized not in ACTION_INDEX:
         return "no_change"
     return normalized
-
 
 def _estimate_signal_counts(context_features: Dict[str, Any], complexity: float) -> Tuple[int, int, int, int]:
     algorithm_text = str(context_features.get("algorithm_type", "")).lower()
@@ -142,7 +131,6 @@ def _estimate_signal_counts(context_features: Dict[str, Any], complexity: float)
         bottlenecks = max(bottlenecks, 2)
         opportunities = max(opportunities, 2)
     return bottlenecks, opportunities, security_issues, violations
-
 
 def _reward_from_record(record: Dict[str, Any], objective_weights: Dict[str, float], reward_scale: float) -> float:
     runtime_delta = _to_float(record.get("runtime_delta_pct"))
@@ -189,7 +177,6 @@ def _reward_from_record(record: Dict[str, Any], objective_weights: Dict[str, flo
         reward_scale = 10000.0
     return float(np.tanh(float(raw_reward) / reward_scale))
 
-
 def _next_state_counts_from_reward(
     reward: float,
     *,
@@ -220,7 +207,6 @@ def _next_state_counts_from_reward(
         next_security_issues,
         next_violations,
     )
-
 
 def legacy_record_to_transition(
     record: Dict[str, Any],
@@ -322,7 +308,6 @@ def legacy_record_to_transition(
         done=done,
     )
 
-
 def _iter_legacy_records(input_dir: Path) -> Iterable[Tuple[Path, Dict[str, Any]]]:
     patterns = ("episode_*.json", "training_episode_*.json")
     files: List[Path] = []
@@ -337,7 +322,6 @@ def _iter_legacy_records(input_dir: Path) -> Iterable[Tuple[Path, Dict[str, Any]
             for item in payload:
                 if isinstance(item, dict):
                     yield file_path, item
-
 
 def _synthetic_legacy_records(count: int, seed: int) -> List[Dict[str, Any]]:
     random.seed(seed)
@@ -424,59 +408,86 @@ def _synthetic_legacy_records(count: int, seed: int) -> List[Dict[str, Any]]:
         ("well_optimized_code", "no_change",              (0.10, 0.35), (0.0, 1.0),    (0.0, 1.0),    0.80),
     ]
 
+    # Generate multi-step episodes: the agent applies a sequence of
+    # optimizations to the same code, with state evolving between steps.
+    # Only the final step of each episode is terminal (done=True).
     rows: List[Dict[str, Any]] = []
-    for _ in range(count):
-        (
-            algorithm_type, action_type,
-            (cplx_lo, cplx_hi),
-            (rt_lo, rt_hi),
-            (mem_lo, mem_hi),
-            neg_weight,
-        ) = random.choice(_TEMPLATES)
+    episode_lengths = list(range(3, 9))  # 3-8 steps per episode
 
-        complexity = random.uniform(cplx_lo, cplx_hi)
-        system_load = random.uniform(15.0, 85.0)
+    while len(rows) < count:
+        episode_len = random.choice(episode_lengths)
+        episode_len = min(episode_len, count - len(rows))
+
+        # Initial state for this episode (represents a code file to optimize)
+        complexity = random.uniform(0.50, 0.95)
+        maintainability = max(0.0, 1.0 - complexity * 0.6 + random.uniform(-0.1, 0.1))
         confidence = random.uniform(0.50, 0.95)
-
-        # Decide if this is a negative example (wrong/unhelpful action)
-        is_negative = random.random() < neg_weight
-        if is_negative:
-            runtime_delta = random.uniform(-15.0, 2.0)
-            memory_delta = random.uniform(-10.0, 2.0)
-        else:
-            runtime_delta = random.uniform(rt_lo, rt_hi)
-            memory_delta = random.uniform(mem_lo, mem_hi)
-
-        # Derive additional context features for richer state vectors
+        system_load = random.uniform(15.0, 85.0)
         bottlenecks = max(0, int(round(complexity * random.uniform(3.0, 8.0))))
         opportunities = max(0, int(round(complexity * random.uniform(2.0, 7.0))))
-        security_issues = random.randint(0, 3) if "security" in action_type else 0
+        security_issues = random.randint(0, 3)
         violations = max(0, int(round(complexity * random.uniform(1.0, 5.0))))
 
-        rows.append(
-            {
-                "context_features": {
-                    "complexity_score": complexity,
-                    "algorithm_type": algorithm_type,
-                    "system_load_pct": system_load,
-                    "maintainability_score": max(0.0, 1.0 - complexity * 0.6 + random.uniform(-0.1, 0.1)),
-                    "confidence_score": confidence,
-                    "bottlenecks_count": bottlenecks,
-                    "opportunities_count": opportunities,
-                    "security_issues_count": security_issues,
-                    "best_practices_violations_count": violations,
-                },
-                "action_taken": {
-                    "type": action_type,
-                    "parameters": {"confidence": confidence},
-                },
-                "runtime_delta_pct": runtime_delta,
-                "memory_delta_pct": memory_delta,
-                "success": (runtime_delta + memory_delta) > 0,
-            }
-        )
-    return rows
+        for step in range(episode_len):
+            # Pick a template for this step
+            (
+                algorithm_type, action_type,
+                (cplx_lo, cplx_hi),
+                (rt_lo, rt_hi),
+                (mem_lo, mem_hi),
+                neg_weight,
+            ) = random.choice(_TEMPLATES)
 
+            # Decide if this is a negative example (wrong/unhelpful action)
+            is_negative = random.random() < neg_weight
+            if is_negative:
+                runtime_delta = random.uniform(-15.0, 2.0)
+                memory_delta = random.uniform(-10.0, 2.0)
+            else:
+                # Scale improvement by remaining complexity (diminishing returns)
+                scale = min(1.0, complexity / 0.5)
+                runtime_delta = random.uniform(rt_lo, rt_hi) * scale
+                memory_delta = random.uniform(mem_lo, mem_hi) * scale
+
+            is_terminal = (step == episode_len - 1)
+
+            rows.append(
+                {
+                    "context_features": {
+                        "complexity_score": complexity,
+                        "algorithm_type": algorithm_type,
+                        "system_load_pct": system_load,
+                        "maintainability_score": maintainability,
+                        "confidence_score": confidence,
+                        "bottlenecks_count": bottlenecks,
+                        "opportunities_count": opportunities,
+                        "security_issues_count": security_issues,
+                        "best_practices_violations_count": violations,
+                    },
+                    "action_taken": {
+                        "type": action_type,
+                        "parameters": {"confidence": confidence},
+                    },
+                    "runtime_delta_pct": runtime_delta,
+                    "memory_delta_pct": memory_delta,
+                    "success": (runtime_delta + memory_delta) > 0,
+                    "done": is_terminal,
+                }
+            )
+
+            # Evolve state for the next step (mirrors _next_state_counts_from_reward)
+            reward_approx = (runtime_delta / 100.0) * 0.5 + (memory_delta / 100.0) * 0.5
+            delta = max(-0.25, min(0.25, reward_approx))
+            improved = max(0.0, delta)
+            regressed = max(0.0, -delta)
+            complexity = max(0.1, min(1.0, complexity - improved * 0.35 + regressed * 0.15))
+            maintainability = max(0.0, min(1.0, maintainability + improved * 0.40 - regressed * 0.20))
+            bottlenecks = max(0, int(round(bottlenecks * (1.0 - improved * 0.5 + regressed * 0.2))))
+            opportunities = max(0, int(round(opportunities * (1.0 - improved * 0.4 + regressed * 0.1))))
+            security_issues = max(0, int(round(security_issues * (1.0 - improved * 0.3 + regressed * 0.3))))
+            violations = max(0, int(round(violations * (1.0 - improved * 0.35 + regressed * 0.25))))
+
+    return rows
 
 def generate_transitions_from_legacy(
     *,
@@ -552,7 +563,6 @@ def generate_transitions_from_legacy(
     stats.transitions_written = len(transitions)
     return stats
 
-
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate production-aligned transition JSONL for DQN pretraining."
@@ -580,7 +590,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--strict", action="store_true")
     return parser
-
 
 def main() -> None:
     parser = _build_arg_parser()
@@ -618,7 +627,6 @@ def main() -> None:
     print(f"  records_skipped: {stats.records_skipped}")
     print(f"  synthetic_records: {stats.synthetic_records}")
     print(f"  transitions_written: {stats.transitions_written}")
-
 
 if __name__ == "__main__":
     main()

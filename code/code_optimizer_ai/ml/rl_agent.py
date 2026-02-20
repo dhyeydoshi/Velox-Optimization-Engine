@@ -1,7 +1,3 @@
-"""
-Reinforcement Learning Agent for Code Optimization
-Implements DQN agent for learning optimal optimization strategies
-"""
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -19,75 +15,79 @@ from code.code_optimizer_ai.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
 # Experience replay buffer
 Experience = namedtuple(
     'Experience',
     ['state', 'action', 'reward', 'next_state', 'done']
 )
 
-
 class ReplayBuffer:
-    """Experience replay buffer for DQN training"""
     
     def __init__(self, capacity: int = 10000):
         self.buffer = deque(maxlen=capacity)
         self.capacity = capacity
     
     def push(self, state, action, reward, next_state, done):
-        """Add experience to buffer"""
         experience = Experience(state, action, reward, next_state, done)
         self.buffer.append(experience)
     
     def sample(self, batch_size: int) -> List[Experience]:
-        """Sample batch of experiences"""
         batch = random.sample(self.buffer, batch_size)
         return batch
     
     def __len__(self):
         return len(self.buffer)
 
-
 class QNetwork(nn.Module):
-    """Deep Q-Network for code optimization decisions"""
-    
+    """Dueling DQN for code optimization decisions.
+
+    Architecture: shared feature extraction -> value stream + advantage stream.
+    Q(s,a) = V(s) + A(s,a) - mean(A(s,.))
+
+    This reduces overestimation by separating state value from action advantage,
+    which is critical when many of the 25 actions have similar expected returns.
+    """
+
     def __init__(self, state_dim: int = 27, action_dim: int = 25, hidden_dim: int = 256):
         super(QNetwork, self).__init__()
-        
-        # Shared feature extraction layers
+
+        # Shared feature extraction (no dropout -- DQN needs deterministic Q-values)
         self.feature_layers = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU()
         )
-        
-        # Value estimation layers
-        self.value_layers = nn.Sequential(
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 4, action_dim)
-        )
-        
-        # Initialize weights
-        self.apply(self._init_weights)
-    
-    def _init_weights(self, module):
-        """Initialize network weights"""
-        if isinstance(module, nn.Linear):
-            torch.nn.init.xavier_uniform_(module.weight)
-            module.bias.data.fill_(0.01)
-    
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the network"""
-        features = self.feature_layers(state)
-        q_values = self.value_layers(features)
-        return q_values
 
+        # Value stream: estimates V(s)
+        self.value_stream = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+        # Advantage stream: estimates A(s, a) for each action
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, action_dim),
+        )
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """Kaiming initialization for ReLU layers."""
+        if isinstance(module, nn.Linear):
+            torch.nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
+            module.bias.data.fill_(0.0)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        features = self.feature_layers(state)
+        value = self.value_stream(features)
+        advantage = self.advantage_stream(features)
+        # Dueling combination: subtract mean advantage for identifiability
+        q_values = value + advantage - advantage.mean(dim=1, keepdim=True)
+        return q_values
 
 class DQNAgent:
     """Deep Q-Network Agent for code optimization"""
@@ -103,6 +103,7 @@ class DQNAgent:
         epsilon_end: float = 0.01,
         epsilon_decay: float = 0.995,
         target_update_freq: int = 100,
+        tau: float = 0.005,
         replay_buffer_size: int = 10000,
         batch_size: int = 32
     ):
@@ -115,6 +116,7 @@ class DQNAgent:
         self.epsilon_end = epsilon_end
         self.epsilon_decay = epsilon_decay
         self.target_update_freq = target_update_freq
+        self.tau = tau
         self.batch_size = batch_size
         
         # Device configuration
@@ -144,7 +146,6 @@ class DQNAgent:
         self._load_model()
     
     def select_action(self, state: np.ndarray, training: bool = True) -> int:
-        """Select action using epsilon-greedy policy"""
         
         if training and random.random() < self.epsilon:
             # Explore: random action
@@ -166,7 +167,6 @@ class DQNAgent:
         next_state: np.ndarray,
         done: bool
     ):
-        """Store experience in replay buffer"""
         
         self.memory.push(state, action, reward, next_state, done)
     
@@ -196,13 +196,15 @@ class DQNAgent:
         # Current Q values
         current_q_values = self.q_network(state_batch).gather(1, action_batch.unsqueeze(1))
         
-        # Next Q values from target network
+        # Double DQN: online network selects best action, target network evaluates it.
+        # This eliminates the maximization bias of vanilla DQN.
         with torch.no_grad():
-            next_q_values = self.target_network(next_state_batch).max(1)[0]
+            best_actions = self.q_network(next_state_batch).argmax(1, keepdim=True)
+            next_q_values = self.target_network(next_state_batch).gather(1, best_actions).squeeze(1)
             target_q_values = reward_batch + (self.gamma * next_q_values * ~done_batch)
         
-        # Compute loss
-        loss = F.mse_loss(current_q_values.squeeze(), target_q_values)
+        # Huber loss (smooth L1) -- robust to outlier TD errors
+        loss = F.smooth_l1_loss(current_q_values.squeeze(), target_q_values)
         
         # Optimize
         self.optimizer.zero_grad()
@@ -217,10 +219,13 @@ class DQNAgent:
         self.training_step += 1
         self.episode_losses.append(loss.item())
         
-        # Update target network periodically
-        if self.training_step % self.target_update_freq == 0:
-            self.target_network.load_state_dict(self.q_network.state_dict())
-            logger.debug(f"Target network updated at step {self.training_step}")
+        # Soft target update (Polyak averaging) every step for smooth convergence
+        for target_param, online_param in zip(
+            self.target_network.parameters(), self.q_network.parameters()
+        ):
+            target_param.data.copy_(
+                self.tau * online_param.data + (1.0 - self.tau) * target_param.data
+            )
         
         # Decay epsilon (optionally, for backward compat / online training)
         if decay_epsilon and self.epsilon > self.epsilon_end:
@@ -229,7 +234,6 @@ class DQNAgent:
         return loss.item()
     
     def save_model(self, filepath: str):
-        """Save trained model"""
         
         model_data = {
             "q_network_state_dict": self.q_network.state_dict(),
@@ -244,6 +248,7 @@ class DQNAgent:
                 "epsilon_start": self.epsilon_start,
                 "epsilon_end": self.epsilon_end,
                 "epsilon_decay": self.epsilon_decay,
+                "tau": self.tau,
                 "batch_size": self.batch_size
             }
         }
@@ -252,7 +257,6 @@ class DQNAgent:
         logger.info(f"Model saved to {filepath}")
     
     def _load_model(self):
-        """Load existing model if available"""
         
         model_path = Path(settings.RL_MODEL_PATH) / "dqn_model.pth"
         
@@ -279,7 +283,6 @@ class DQNAgent:
         state: np.ndarray,
         action_names: List[str]
     ) -> Dict[str, Any]:
-        """Get action recommendation with confidence scores"""
         
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         
@@ -324,12 +327,10 @@ class DQNAgent:
         }
     
     def reset_episode_metrics(self):
-        """Reset episode-specific metrics"""
         self.episode_reward = 0
         self.episode_losses = []
     
     def get_training_stats(self) -> Dict[str, Any]:
-        """Get current training statistics"""
         
         return {
             "training_step": self.training_step,
@@ -340,7 +341,6 @@ class DQNAgent:
             "device": str(self.device),
             "model_parameters": sum(p.numel() for p in self.q_network.parameters())
         }
-
 
 class RLTrainer:
     """EXPERIMENTAL: Online RL training via synthetic environment.
@@ -364,12 +364,9 @@ class RLTrainer:
         self.episode_rewards = []
         self.episode_lengths = []
         self.eval_rewards = []
-        
-        # Create directories
         Path(settings.TRAINING_DATA_PATH).mkdir(parents=True, exist_ok=True)
     
     async def train(self) -> Dict[str, Any]:
-        """Train the RL agent"""
         
         logger.info(f"Starting RL training for {self.num_episodes} episodes")
 
@@ -448,7 +445,6 @@ class RLTrainer:
         return training_stats
     
     async def _evaluate_agent(self) -> float:
-        """Evaluate agent performance without exploration"""
         
         total_reward = 0
         num_eval_episodes = 10
@@ -474,15 +470,10 @@ class RLTrainer:
         return total_reward / num_eval_episodes
     
     def _decode_action(self, action_idx: int) -> np.ndarray:
-        """Convert action index back to action vector"""
         
         # Create dummy action vector
         action = np.zeros(4)
-        
-        # Set action type based on index
         action[0] = action_idx
-        
-        # Set other parameters to default values
         action[1] = 0.5  # intensity
         action[2] = 0    # target scope
         action[3] = 0.3  # risk level
@@ -490,7 +481,6 @@ class RLTrainer:
         return action
     
     def _get_training_summary(self) -> Dict[str, Any]:
-        """Get comprehensive training summary"""
         
         if not self.episode_rewards:
             return {"error": "No training data available"}
@@ -507,7 +497,6 @@ class RLTrainer:
         }
     
     def _calculate_improvement_trend(self) -> Dict[str, float]:
-        """Calculate improvement trend over training"""
         
         if len(self.episode_rewards) < 100:
             return {"trend": 0.0, "correlation": 0.0}
@@ -529,14 +518,11 @@ class RLTrainer:
             "last_quarter_avg": np.mean(self.episode_rewards[-len(self.episode_rewards)//4:])
         }
 
-
 # Lazy singleton -- avoids heavy init (DQNAgent + model load) at import time.
 _rl_trainer_instance: Optional["RLTrainer"] = None
 _rl_trainer_lock = threading.Lock()
 
-
 def get_rl_trainer() -> "RLTrainer":
-    """Return the module-level RLTrainer singleton (lazy, thread-safe)."""
     global _rl_trainer_instance
     with _rl_trainer_lock:
         if _rl_trainer_instance is None:

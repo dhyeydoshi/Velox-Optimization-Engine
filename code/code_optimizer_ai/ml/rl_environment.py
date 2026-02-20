@@ -17,29 +17,23 @@ from code.code_optimizer_ai.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
 @dataclass
 class CodeState:
-    """Represents the current state of code being optimized"""
     file_path: str
     complexity_score: float
     performance_metrics: Dict[str, float]
     optimization_history: List[str]
     context_features: Dict[str, float]
 
-
 @dataclass
 class OptimizationAction:
-    """Represents an optimization action to be taken"""
     action_type: str  # 'algorithm_change', 'data_structure', 'caching', 'parallelization'
     target_code_section: str
     parameters: Dict[str, Any]
     expected_impact: float
 
-
 @dataclass
 class OptimizationOutcome:
-    """Represents the outcome of an optimization action"""
     success: bool
     performance_improvement: float
     runtime_delta_pct: float
@@ -47,7 +41,6 @@ class OptimizationOutcome:
     implementation_time: float
     code_quality_impact: float
     resource_usage: float
-
 
 class CodeOptimizationEnvironment(gym.Env):
     """
@@ -104,7 +97,6 @@ class CodeOptimizationEnvironment(gym.Env):
         self.training_episodes = []
         
     def reset(self, seed: Optional[int] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Reset environment to initial state"""
         
         super().reset(seed=seed)
         self.current_step = 0
@@ -161,7 +153,6 @@ class CodeOptimizationEnvironment(gym.Env):
         return observation, reward, terminated, truncated, info
     
     def _generate_code_state(self) -> CodeState:
-        """Generate a code state for optimization training"""
         
         # This would normally come from real code analysis
         # For training, we generate synthetic states
@@ -204,7 +195,6 @@ class CodeOptimizationEnvironment(gym.Env):
         )
     
     def _decode_action(self, action: np.ndarray) -> OptimizationAction:
-        """Convert RL action to OptimizationAction"""
         
         action_type_idx = int(action[0])
         intensity = float(action[1])
@@ -233,7 +223,6 @@ class CodeOptimizationEnvironment(gym.Env):
         intensity: float,
         risk_level: float
     ) -> Dict[str, Any]:
-        """Generate parameters for optimization action"""
         
         base_params = {
             "intensity": intensity,
@@ -281,7 +270,6 @@ class CodeOptimizationEnvironment(gym.Env):
         return base_params
     
     def _execute_optimization(self, action: OptimizationAction) -> OptimizationOutcome:
-        """Execute optimization and measure outcome"""
         
         # Simulate optimization execution
         # In real implementation, this would execute actual code optimization

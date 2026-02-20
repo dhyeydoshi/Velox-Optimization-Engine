@@ -25,7 +25,6 @@ from code.code_optimizer_ai.utils.logger import get_logger
 logger = get_logger(__name__)
 ACTION_INDEX = {name: idx for idx, name in enumerate(PRODUCTION_ACTION_TYPES)}
 
-
 @dataclass
 class Transition:
     state: np.ndarray
@@ -34,14 +33,12 @@ class Transition:
     next_state: np.ndarray
     done: bool
 
-
 @dataclass
 class LoadStats:
     files: int = 0
     lines: int = 0
     accepted: int = 0
     skipped: int = 0
-
 
 def _resolve_path(path_value: str) -> Path:
     candidate = Path(path_value)
@@ -51,14 +48,11 @@ def _resolve_path(path_value: str) -> Path:
         candidate = candidate.resolve()
     return candidate
 
-
 def _default_input_path() -> Path:
     return _resolve_path(str(Path(settings.TRAINING_DATA_PATH) / "pretrain_transitions.jsonl"))
 
-
 def _default_output_path() -> Path:
     return _resolve_path(str(Path(settings.RL_MODEL_PATH) / "dqn_model.pth"))
-
 
 def _positive_int(value: str) -> int:
     parsed = int(value)
@@ -66,13 +60,11 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
 
-
 def _non_negative_float(value: str) -> float:
     parsed = float(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be non-negative")
     return parsed
-
 
 def _discover_jsonl_files(input_path: Path) -> List[Path]:
     if input_path.is_file():
@@ -87,7 +79,6 @@ def _discover_jsonl_files(input_path: Path) -> List[Path]:
         return files
 
     raise ValueError(f"Input path not found: {input_path}")
-
 
 def _to_vector(
     value: Any,
@@ -106,14 +97,12 @@ def _to_vector(
         raise ValueError(f"'{field_name}' contains non-finite values")
     return vector
 
-
 def _to_done_flag(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, np.integer)) and value in (0, 1):
         return bool(value)
     raise ValueError("'done' must be a bool or integer 0/1")
-
 
 def _parse_transition_record(
     record: Dict[str, Any],
@@ -157,7 +146,6 @@ def _parse_transition_record(
         next_state=next_state,
         done=done,
     )
-
 
 def _load_transitions(
     jsonl_files: Iterable[Path],
@@ -217,14 +205,12 @@ def _load_transitions(
 
     return transitions, stats
 
-
 def _seed_all(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
 
 def _maybe_reset_agent(agent: DQNAgent, *, hidden_dim: int, replay_buffer_size: int,
                        learning_rate: float = 1e-3) -> None:
@@ -240,7 +226,6 @@ def _maybe_reset_agent(agent: DQNAgent, *, hidden_dim: int, replay_buffer_size: 
     agent.training_step = 0
     agent.epsilon = agent.epsilon_start
     agent.episode_losses = []
-
 
 def _populate_replay_buffer(
     agent: DQNAgent,
@@ -260,13 +245,13 @@ def _populate_replay_buffer(
             item.done,
         )
 
-
 def _offline_pretrain(
     agent: DQNAgent,
     *,
     epochs: int,
     steps_per_epoch: int,
     log_every: int,
+    scheduler: Optional[Any] = None,
 ) -> Dict[str, Any]:
     epoch_losses: List[float] = []
     updates = 0
@@ -278,6 +263,8 @@ def _offline_pretrain(
             if loss is not None:
                 losses.append(float(loss))
                 updates += 1
+            if scheduler is not None:
+                scheduler.step()
 
         avg_loss = float(np.mean(losses)) if losses else float("nan")
         if losses:
@@ -308,7 +295,6 @@ def _offline_pretrain(
         summary["avg_epoch_loss"] = float(np.mean(epoch_losses))
         summary["final_epoch_loss"] = float(epoch_losses[-1])
     return summary
-
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -345,7 +331,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Ignore any existing checkpoint loaded by DQNAgent and start from random initialization.",
     )
     return parser
-
 
 def main() -> None:
     parser = _build_parser()
@@ -407,11 +392,23 @@ def main() -> None:
             "Provide more transitions or lower batch size."
         )
 
+    # Compute per-epoch epsilon decay to reach epsilon_end by final epoch
+    agent.epsilon_decay = (agent.epsilon_end / max(agent.epsilon_start, 1e-8)) ** (
+        1.0 / max(args.epochs, 1)
+    )
+
+    # LR scheduler: cosine annealing from initial LR to 1e-5
+    total_steps = args.epochs * args.steps_per_epoch
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        agent.optimizer, T_max=total_steps, eta_min=1e-5,
+    )
+
     pretrain_summary = _offline_pretrain(
         agent,
         epochs=args.epochs,
         steps_per_epoch=args.steps_per_epoch,
         log_every=args.log_every,
+        scheduler=scheduler,
     )
 
     agent.save_model(str(output_path))
@@ -436,7 +433,6 @@ def main() -> None:
     print(f"  Loaded transitions: {load_stats.accepted}")
     print(f"  Skipped transitions: {load_stats.skipped}")
     print(f"  Updates: {pretrain_summary.get('updates', 0)}")
-
 
 if __name__ == "__main__":
     main()

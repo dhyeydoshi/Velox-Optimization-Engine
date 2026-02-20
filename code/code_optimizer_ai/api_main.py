@@ -243,12 +243,6 @@ def require_api_auth(
     request: Request,
     x_api_token: Optional[str] = Header(default=None, alias="X-API-Token")
 ) -> None:
-    """
-    API authentication dependency with audit logging.
-    
-    Validates X-API-Token header against configured API_AUTH_TOKEN.
-    Logs all authentication failures for security monitoring.
-    """
     expected = settings.API_AUTH_TOKEN
     if not expected:
         return

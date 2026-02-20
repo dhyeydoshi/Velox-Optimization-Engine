@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import json
 import threading
 from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -35,7 +37,6 @@ from code.code_optimizer_ai.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
 @dataclass
 class OptimizationDecision:
     """Decision made by RL agent for code optimization."""
@@ -48,7 +49,6 @@ class OptimizationDecision:
     parameters: Dict[str, Any]
     priority: str
 
-
 @dataclass
 class OptimizationContext:
     """Context for optimization decision making."""
@@ -59,7 +59,6 @@ class OptimizationContext:
     system_load: float
     business_requirements: Dict[str, Any]
     objective_weights: Dict[str, float]
-
 
 class RLCodeOptimizer:
     """RL-powered code optimization engine."""
@@ -758,11 +757,34 @@ class RLCodeOptimizer:
             state=state,
             action_idx=action_idx,
             reward=value,
-            next_state=np.zeros_like(state),   # terminal -- no successor
+            next_state=state.copy(),  # Use current state (avoids zero-vector bias)
             done=True,
         )
         self.policy_manager.record_shadow_feedback(feedback)
         self.policy_manager.train_shadow(max_updates=5)
+        self._persist_feedback(feedback)
+
+    def _persist_feedback(self, feedback: PolicyFeedback):
+        """Persist feedback transition to JSONL for future offline retraining."""
+        try:
+            feedback_dir = Path(settings.TRAINING_DATA_PATH)
+            if not feedback_dir.is_absolute():
+                feedback_dir = (Path(__file__).resolve().parents[3] / feedback_dir).resolve()
+            feedback_dir.mkdir(parents=True, exist_ok=True)
+            feedback_path = feedback_dir / "online_feedback.jsonl"
+            record = {
+                "state": feedback.state.tolist(),
+                "action_idx": feedback.action_idx,
+                "reward": feedback.reward,
+                "next_state": feedback.next_state.tolist(),
+                "done": feedback.done,
+                "source": "shadow_feedback",
+                "timestamp": datetime.now().isoformat(),
+            }
+            with feedback_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception as exc:
+            logger.warning("Failed to persist shadow feedback", error=str(exc))
 
     def _store_optimization_history(
         self,
@@ -781,10 +803,8 @@ class RLCodeOptimizer:
         }
         self.optimization_history.append(history_entry)
 
-
 _rl_optimizer_instance: Optional["RLCodeOptimizer"] = None
 _rl_optimizer_lock = threading.Lock()
-
 
 def get_rl_optimizer() -> "RLCodeOptimizer":
     """Return the module-level RLCodeOptimizer singleton (lazy, thread-safe)."""
