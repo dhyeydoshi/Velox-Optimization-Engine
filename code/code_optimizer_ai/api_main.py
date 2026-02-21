@@ -20,7 +20,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -37,6 +37,7 @@ from code.code_optimizer_ai.core.llm_analyzer import code_analyzer
 from code.code_optimizer_ai.core.performance_profiler import performance_profiler
 from code.code_optimizer_ai.database.connection import cache_manager, db_manager
 from code.code_optimizer_ai.database.migrate import create_database_schema, seed_sample_data
+from code.code_optimizer_ai.evolutionary.pipeline import evolutionary_pipeline
 from code.code_optimizer_ai.ml.rl_optimizer import get_rl_optimizer
 from code.code_optimizer_ai.ml.training_semantics import PRODUCTION_ACTION_TYPES
 from code.code_optimizer_ai.ml.training_runner import (
@@ -49,6 +50,7 @@ from code.code_optimizer_ai.ml.training_runner import (
     run_training_job,
 )
 from code.code_optimizer_ai.config.settings import settings
+from code.code_optimizer_ai.config.evolutionary import PHASE_A_MAX_SUGGESTIONS
 from code.code_optimizer_ai.utils.logger import get_logger
 from code.code_optimizer_ai.utils.paths import parse_csv, allowed_code_roots
 
@@ -57,6 +59,36 @@ ERROR_GENERIC = "Internal server error"
 _RATE_LIMIT_WINDOWS: Dict[str, deque] = defaultdict(deque)
 _GITHUB_ALLOWED_HOSTS = {"github.com", "www.github.com"}
 _GIT_REF_PATTERN = re.compile(r"^[A-Za-z0-9._/-]{1,128}$")
+
+V1_PUBLIC_ENDPOINTS = [
+    "/",
+    "/endpoints",
+    "/health",
+    "/suggestions/categories",
+]
+V1_PROTECTED_ENDPOINTS = [
+    "/health/details",
+    "/database/status",
+    "/database/migrate",
+    "/database/seed",
+    "/demo/database",
+    "/optimize",
+    "/optimize/file",
+    "/scan",
+    "/scan/repository",
+    "/optimize/repository",
+    "/pipeline/status",
+    "/train",
+    "/train/{job_id}",
+    "/metrics",
+    "/monitor/directory",
+]
+V2_ENDPOINTS = [
+    "/v2/optimize",
+    "/v2/optimize/repository",
+    "/v2/pipeline/status",
+]
+_VERSION_ROUTERS_REGISTERED = False
 
 
 def _allowed_code_roots() -> List[Path]:
@@ -329,6 +361,8 @@ app = FastAPI(
     openapi_url="/openapi.json" if docs_enabled else None,
     lifespan=lifespan,
 )
+v1_router = APIRouter(prefix="/v1", tags=["v1"])
+v2_router = APIRouter(prefix="/v2", tags=["v2"])
 
 # Add CORS middleware
 cors_origins = parse_csv(settings.CORS_ALLOWED_ORIGINS) or ["http://localhost", "http://127.0.0.1"]
@@ -401,6 +435,74 @@ def parse_priority(priority_value: str) -> TaskPriority:
             status_code=400,
             detail=f"Invalid priority '{priority_value}'. Use: low, medium, high, critical"
         )
+
+
+def _ensure_v2_feature_enabled() -> None:
+    if not settings.FEATURE_EVOLUTIONARY_SEARCH:
+        raise HTTPException(
+            status_code=503,
+            detail="Evolutionary search is disabled. Set FEATURE_EVOLUTIONARY_SEARCH=true to enable /v2 routes.",
+        )
+
+
+def _normalize_representative_input(values: Optional[List[str]]) -> List[str]:
+    return [str(item).strip() for item in (values or []) if str(item).strip()]
+
+
+def _versioned_endpoint_inventory() -> Dict[str, Any]:
+    docs_entries = ["/docs", "/redoc", "/openapi.json"] if docs_enabled else []
+    v1_aliases = [
+        f"/v1{path}"
+        for path in [*V1_PUBLIC_ENDPOINTS, *V1_PROTECTED_ENDPOINTS]
+        if path.startswith("/") and path != "/"
+    ]
+    return {
+        "v1": {
+            "public": list(V1_PUBLIC_ENDPOINTS),
+            "protected": list(V1_PROTECTED_ENDPOINTS),
+            "aliases": v1_aliases,
+        },
+        "v2": {
+            "feature_flag": "FEATURE_EVOLUTIONARY_SEARCH",
+            "enabled": settings.FEATURE_EVOLUTIONARY_SEARCH,
+            "routes": list(V2_ENDPOINTS),
+        },
+        "docs": docs_entries,
+    }
+
+
+def _register_versioned_routers() -> None:
+    global _VERSION_ROUTERS_REGISTERED
+    if _VERSION_ROUTERS_REGISTERED:
+        return
+    # Create compact /v1 alias router by reusing existing app endpoints.
+    # This avoids duplicating large static specs while providing explicit
+    # versioned aliases for backward compatibility.
+    v1_alias_router = APIRouter(prefix="/v1", tags=["v1"])
+
+    # Build set of v1 paths we want to alias (exclude root "/").
+    v1_paths = {p for p in [*V1_PUBLIC_ENDPOINTS, *V1_PROTECTED_ENDPOINTS] if p and p != "/"}
+
+    # Iterate existing app routes and register them under the /v1 prefix
+    # when their path matches a v1 path. Filter methods to common HTTP verbs.
+    allowed_methods = {"GET", "POST", "PUT", "DELETE", "PATCH"}
+    for route in list(app.router.routes):
+        route_path = getattr(route, "path", None)
+        if route_path in v1_paths:
+            methods = [m for m in getattr(route, "methods", []) if m in allowed_methods]
+            # Add the same endpoint callable under the /v1 alias. Keep it simple
+            # and avoid re-specifying response models here to reduce duplication.
+            try:
+                v1_alias_router.add_api_route(path=route_path, endpoint=route.endpoint, methods=methods)
+            except Exception:
+                # Best-effort aliasing; skip routes that cannot be re-registered.
+                logger.debug(f"Skipping alias for {route_path}")
+
+    # Include routers: keep v1 endpoints defined on `app` as-is, provide /v1 aliases,
+    # and include the v2 router for new routes.
+    app.include_router(v1_alias_router)
+    app.include_router(v2_router)
+    _VERSION_ROUTERS_REGISTERED = True
 
 
 def _serialize_suggestions(suggestions: List[Any]) -> List[Dict[str, Any]]:
@@ -843,6 +945,83 @@ class PipelineStatusResponse(BaseModel):
     timestamp: str
 
 
+class V2OptimizeRequest(BaseModel):
+    code: Optional[str] = None
+    file_path: Optional[str] = None
+    representative_input: List[str] = Field(default_factory=list)
+    objective_weights: Optional[Dict[str, float]] = None
+    max_suggestions: int = Field(default=PHASE_A_MAX_SUGGESTIONS, ge=1, le=3)
+    run_unit_tests: bool = False
+    unit_test_command: Optional[str] = None
+
+
+class V2Suggestion(BaseModel):
+    candidate_id: str
+    code_patch: str
+    family_tag: str
+    generation_path: str
+    generation_produced: int
+    composite_score: float
+    runtime_delta_pct: Optional[float] = None
+    memory_delta_pct: Optional[float] = None
+    cv: Optional[float] = None
+    test_pass: Optional[bool] = None
+    run_count: Optional[int] = None
+    warmup_runs_discarded: Optional[int] = None
+    median_runtime_ms: Optional[float] = None
+    mean_runtime_ms: Optional[float] = None
+    runtime_std_ms: Optional[float] = None
+
+
+class V2OptimizeResponse(BaseModel):
+    request_id: str
+    phase: str
+    suggestions: List[V2Suggestion] = Field(default_factory=list)
+    bottleneck_status: str
+    representative_input_warning: bool
+    synthetic_fallback_penalty_applied: bool
+    latency_ms: int
+    candidate_count: int
+    evaluated_count: int
+
+
+class V2RepositoryOptimizeRequest(BaseModel):
+    repo_url: str
+    ref: Optional[str] = None
+    representative_input: List[str] = Field(default_factory=list)
+    objective_weights: Optional[Dict[str, float]] = None
+    max_files: int = Field(default=5, ge=1, le=25)
+    max_suggestions_per_file: int = Field(default=PHASE_A_MAX_SUGGESTIONS, ge=1, le=3)
+    run_unit_tests: bool = False
+    unit_test_command: Optional[str] = None
+
+
+class V2RepositoryOptimizeFileResult(BaseModel):
+    file_path: str
+    request_id: str
+    representative_input_warning: bool
+    suggestions: List[V2Suggestion] = Field(default_factory=list)
+
+
+class V2RepositoryOptimizeResponse(BaseModel):
+    repository_url: str
+    ref: Optional[str] = None
+    status: str
+    files_scanned: int
+    files_analyzed: int
+    files_with_suggestions: int
+    results: List[V2RepositoryOptimizeFileResult] = Field(default_factory=list)
+    processing_time: float
+    timestamp: str
+
+
+class V2PipelineStatusResponse(BaseModel):
+    feature_enabled: bool
+    phase: str
+    pipeline: Dict[str, Any]
+    timestamp: str
+
+
 class TrainingRequest(BaseModel):
     synthetic_samples: int = Field(default=10_000, ge=0, le=100_000)
     epochs: int = Field(default=40, ge=1, le=200)
@@ -867,6 +1046,7 @@ class TrainingResponse(BaseModel):
 
 @app.get("/")
 async def root():
+    inventory = _versioned_endpoint_inventory()
     endpoints = [
         "/health",
         "/optimize",
@@ -875,7 +1055,10 @@ async def root():
         "/scan/repository",
         "/pipeline/status",
         "/train",
+        "/endpoints",
     ]
+    if settings.FEATURE_EVOLUTIONARY_SEARCH:
+        endpoints.extend(V2_ENDPOINTS)
     if docs_enabled:
         endpoints = ["/docs", *endpoints]
     return {
@@ -883,6 +1066,16 @@ async def root():
         "version": settings.APP_VERSION,
         "status": "running",
         "endpoints": endpoints,
+        "endpoints_by_version": inventory,
+    }
+
+
+@app.get("/endpoints")
+async def endpoint_inventory():
+    return {
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "inventory": _versioned_endpoint_inventory(),
     }
 
 
@@ -1385,6 +1578,160 @@ async def get_pipeline_status(
         raise HTTPException(status_code=500, detail=ERROR_GENERIC)
 
 
+@v2_router.post("/optimize", response_model=V2OptimizeResponse)
+async def optimize_code_v2(
+    request: V2OptimizeRequest,
+    _: None = Depends(require_api_auth),
+):
+    _ensure_v2_feature_enabled()
+    start_time = datetime.now()
+
+    try:
+        if request.unit_test_command and not settings.ENABLE_API_UNIT_TEST_COMMAND_OVERRIDE:
+            raise HTTPException(
+                status_code=400,
+                detail="Overriding unit_test_command via API is disabled",
+            )
+
+        representative_input = _normalize_representative_input(request.representative_input)
+
+        if request.code:
+            source_code = request.code
+            source_path = request.file_path or "inline_code.py"
+        elif request.file_path:
+            normalized_file = _normalize_user_path(request.file_path, expect_file=True)
+            if normalized_file.suffix.lower() != ".py":
+                raise HTTPException(status_code=400, detail="Only Python files (.py) are supported")
+            source_code = normalized_file.read_text(encoding="utf-8")
+            source_path = str(normalized_file)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Either 'code' or 'file_path' must be provided",
+            )
+
+        if len(source_code) > settings.MAX_INLINE_CODE_CHARS:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Code payload exceeds max size of {settings.MAX_INLINE_CODE_CHARS} characters",
+            )
+
+        result = await evolutionary_pipeline.optimize_inline(
+            code=source_code,
+            file_path=source_path,
+            representative_input=representative_input,
+            objective_weights=request.objective_weights,
+            max_suggestions=request.max_suggestions,
+            run_unit_tests=request.run_unit_tests,
+            unit_test_command=(
+                request.unit_test_command
+                if settings.ENABLE_API_UNIT_TEST_COMMAND_OVERRIDE
+                else None
+            ),
+        )
+        return V2OptimizeResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("v2_optimization_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=ERROR_GENERIC) from exc
+
+
+@v2_router.post("/optimize/repository", response_model=V2RepositoryOptimizeResponse)
+async def optimize_repository_v2(
+    request: V2RepositoryOptimizeRequest,
+    _: None = Depends(require_api_auth),
+):
+    _ensure_v2_feature_enabled()
+    start_time = datetime.now()
+    clone_dir: Optional[Path] = None
+
+    try:
+        if request.unit_test_command and not settings.ENABLE_API_UNIT_TEST_COMMAND_OVERRIDE:
+            raise HTTPException(
+                status_code=400,
+                detail="Overriding unit_test_command via API is disabled",
+            )
+
+        representative_input = _normalize_representative_input(request.representative_input)
+        clone_dir = await asyncio.to_thread(
+            _clone_github_repository,
+            request.repo_url,
+            request.ref,
+        )
+        scan_result, statistics, _, _ = await _scan_directory_summary(
+            str(clone_dir),
+            True,
+            False,
+        )
+        target_files = _select_repository_files(scan_result, statistics, request.max_files)
+
+        file_results: List[V2RepositoryOptimizeFileResult] = []
+        files_with_suggestions = 0
+        unit_cmd = (
+            request.unit_test_command
+            if settings.ENABLE_API_UNIT_TEST_COMMAND_OVERRIDE
+            else None
+        )
+        for code_file in target_files:
+            result = await evolutionary_pipeline.optimize_inline(
+                code=code_file.content,
+                file_path=code_file.file_path,
+                representative_input=representative_input,
+                objective_weights=request.objective_weights,
+                max_suggestions=request.max_suggestions_per_file,
+                run_unit_tests=request.run_unit_tests,
+                unit_test_command=unit_cmd,
+                analysis_static_metrics={
+                    "project_total_files": scan_result.scanned_files,
+                    "repository_url": request.repo_url,
+                    "repository_ref": request.ref,
+                },
+            )
+            suggestions = [V2Suggestion(**item) for item in result.get("suggestions", [])]
+            if suggestions:
+                files_with_suggestions += 1
+            file_results.append(
+                V2RepositoryOptimizeFileResult(
+                    file_path=code_file.file_path,
+                    request_id=result["request_id"],
+                    representative_input_warning=bool(result.get("representative_input_warning")),
+                    suggestions=suggestions,
+                )
+            )
+
+        return V2RepositoryOptimizeResponse(
+            repository_url=request.repo_url,
+            ref=request.ref,
+            status="completed",
+            files_scanned=scan_result.scanned_files,
+            files_analyzed=len(target_files),
+            files_with_suggestions=files_with_suggestions,
+            results=file_results,
+            processing_time=(datetime.now() - start_time).total_seconds(),
+            timestamp=start_time.isoformat(),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("v2_repository_optimization_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=ERROR_GENERIC) from exc
+    finally:
+        if clone_dir is not None:
+            await asyncio.to_thread(_cleanup_clone_directory, clone_dir)
+
+
+@v2_router.get("/pipeline/status", response_model=V2PipelineStatusResponse)
+async def get_pipeline_status_v2(_: None = Depends(require_api_auth)):
+    _ensure_v2_feature_enabled()
+    return V2PipelineStatusResponse(
+        feature_enabled=settings.FEATURE_EVOLUTIONARY_SEARCH,
+        phase="A",
+        pipeline=evolutionary_pipeline.get_status(),
+        timestamp=datetime.now().isoformat(),
+    )
+
+
 @app.post("/train", response_model=TrainingResponse)
 async def train_rl_model(request: TrainingRequest, _: None = Depends(require_api_auth)):
 
@@ -1703,6 +2050,9 @@ async def get_optimization_categories():
         "total": len(categories),
         "timestamp": datetime.now().isoformat(),
     }
+
+
+_register_versioned_routers()
 
 
 if __name__ == "__main__":

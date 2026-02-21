@@ -13,6 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+import statistics
 from typing import Optional, Sequence
 
 from code.code_optimizer_ai.config.settings import settings
@@ -39,6 +40,12 @@ class ValidationResult:
     runtime_delta_pct: Optional[float]
     memory_delta_pct: Optional[float]
     error: Optional[str] = None
+    median_runtime_ms: Optional[float] = None
+    mean_runtime_ms: Optional[float] = None
+    runtime_std_ms: Optional[float] = None
+    cv: Optional[float] = None
+    run_count: Optional[int] = None
+    warmup_runs_discarded: Optional[int] = None
 
 
 class ValidationEngine:
@@ -139,6 +146,24 @@ class ValidationEngine:
             runtime_ms=float(payload.get("runtime_ms", 0.0)),
             peak_kb=float(payload.get("peak_kb", 0.0)),
         )
+
+    def _run_benchmark_series(
+        self,
+        code: str,
+        *,
+        benchmark_runs: int,
+        warmup_runs: int,
+    ) -> list[BenchmarkMetrics]:
+        measured: list[BenchmarkMetrics] = []
+        total_runs = max(1, int(benchmark_runs)) + max(0, int(warmup_runs))
+        discard = max(0, int(warmup_runs))
+
+        for idx in range(total_runs):
+            result = self._run_microbench(code)
+            if idx >= discard:
+                measured.append(result)
+
+        return measured
 
     @staticmethod
     def _subprocess_env() -> dict:
@@ -340,6 +365,9 @@ class ValidationEngine:
         file_path: str = "",
         run_unit_tests: bool = True,
         unit_test_command: Optional[str] = None,
+        benchmark_mode: bool = False,
+        benchmark_runs: int = 1,
+        warmup_runs: int = 0,
     ) -> ValidationResult:
         # Syntax gate
         try:
@@ -356,6 +384,8 @@ class ValidationEngine:
                 runtime_delta_pct=None,
                 memory_delta_pct=None,
                 error=str(exc),
+                run_count=None,
+                warmup_runs_discarded=warmup_runs if benchmark_mode else 0,
             )
 
         # Unit tests gate
@@ -379,6 +409,8 @@ class ValidationEngine:
                         runtime_delta_pct=None,
                         memory_delta_pct=None,
                         error="Unit tests failed for candidate patch",
+                        run_count=None,
+                        warmup_runs_discarded=warmup_runs if benchmark_mode else 0,
                     )
             elif run_unit_tests:
                 unit_status = None
@@ -394,6 +426,8 @@ class ValidationEngine:
                 runtime_delta_pct=None,
                 memory_delta_pct=None,
                 error="Unit test execution timed out",
+                run_count=None,
+                warmup_runs_discarded=warmup_runs if benchmark_mode else 0,
             )
         except Exception as exc:
             return ValidationResult(
@@ -407,12 +441,77 @@ class ValidationEngine:
                 runtime_delta_pct=None,
                 memory_delta_pct=None,
                 error=str(exc),
+                run_count=None,
+                warmup_runs_discarded=warmup_runs if benchmark_mode else 0,
             )
 
         # Micro-benchmark gate
         try:
-            baseline = self._run_microbench(original_code)
-            candidate = self._run_microbench(candidate_code)
+            if benchmark_mode:
+                baseline_series = self._run_benchmark_series(
+                    original_code,
+                    benchmark_runs=benchmark_runs,
+                    warmup_runs=warmup_runs,
+                )
+                candidate_series = self._run_benchmark_series(
+                    candidate_code,
+                    benchmark_runs=benchmark_runs,
+                    warmup_runs=warmup_runs,
+                )
+
+                baseline_runtimes = [item.runtime_ms for item in baseline_series]
+                candidate_runtimes = [item.runtime_ms for item in candidate_series]
+                baseline_peaks = [item.peak_kb for item in baseline_series]
+                candidate_peaks = [item.peak_kb for item in candidate_series]
+
+                baseline_runtime_ms = (
+                    float(statistics.median(baseline_runtimes))
+                    if baseline_runtimes
+                    else None
+                )
+                candidate_runtime_ms = (
+                    float(statistics.median(candidate_runtimes))
+                    if candidate_runtimes
+                    else None
+                )
+                baseline_peak_kb = (
+                    float(statistics.median(baseline_peaks))
+                    if baseline_peaks
+                    else None
+                )
+                candidate_peak_kb = (
+                    float(statistics.median(candidate_peaks))
+                    if candidate_peaks
+                    else None
+                )
+
+                mean_runtime_ms = (
+                    float(statistics.fmean(candidate_runtimes))
+                    if candidate_runtimes
+                    else None
+                )
+                runtime_std_ms = (
+                    float(statistics.pstdev(candidate_runtimes))
+                    if len(candidate_runtimes) > 1
+                    else 0.0
+                )
+                cv = (
+                    float(runtime_std_ms / mean_runtime_ms)
+                    if mean_runtime_ms and mean_runtime_ms > 0
+                    else 0.0
+                )
+                run_count = len(candidate_runtimes)
+            else:
+                baseline = self._run_microbench(original_code)
+                candidate = self._run_microbench(candidate_code)
+                baseline_runtime_ms = baseline.runtime_ms
+                candidate_runtime_ms = candidate.runtime_ms
+                baseline_peak_kb = baseline.peak_kb
+                candidate_peak_kb = candidate.peak_kb
+                mean_runtime_ms = candidate.runtime_ms
+                runtime_std_ms = 0.0
+                cv = 0.0
+                run_count = 1
         except subprocess.TimeoutExpired:
             return ValidationResult(
                 status="failed_benchmark",
@@ -425,6 +524,8 @@ class ValidationEngine:
                 runtime_delta_pct=None,
                 memory_delta_pct=None,
                 error="Benchmark execution timed out",
+                run_count=None,
+                warmup_runs_discarded=warmup_runs if benchmark_mode else 0,
             )
         except Exception as exc:
             return ValidationResult(
@@ -438,26 +539,34 @@ class ValidationEngine:
                 runtime_delta_pct=None,
                 memory_delta_pct=None,
                 error=str(exc),
+                run_count=None,
+                warmup_runs_discarded=warmup_runs if benchmark_mode else 0,
             )
 
         runtime_delta = 0.0
-        if baseline.runtime_ms > 0:
-            runtime_delta = ((baseline.runtime_ms - candidate.runtime_ms) / baseline.runtime_ms) * 100.0
+        if baseline_runtime_ms and baseline_runtime_ms > 0 and candidate_runtime_ms is not None:
+            runtime_delta = ((baseline_runtime_ms - candidate_runtime_ms) / baseline_runtime_ms) * 100.0
 
         memory_delta = 0.0
-        if baseline.peak_kb > 0:
-            memory_delta = ((baseline.peak_kb - candidate.peak_kb) / baseline.peak_kb) * 100.0
+        if baseline_peak_kb and baseline_peak_kb > 0 and candidate_peak_kb is not None:
+            memory_delta = ((baseline_peak_kb - candidate_peak_kb) / baseline_peak_kb) * 100.0
 
         return ValidationResult(
             status="passed",
             syntax_ok=True,
             unit_tests_passed=unit_status,
-            baseline_runtime_ms=baseline.runtime_ms,
-            candidate_runtime_ms=candidate.runtime_ms,
-            baseline_peak_kb=baseline.peak_kb,
-            candidate_peak_kb=candidate.peak_kb,
+            baseline_runtime_ms=baseline_runtime_ms,
+            candidate_runtime_ms=candidate_runtime_ms,
+            baseline_peak_kb=baseline_peak_kb,
+            candidate_peak_kb=candidate_peak_kb,
             runtime_delta_pct=runtime_delta,
             memory_delta_pct=memory_delta,
+            median_runtime_ms=candidate_runtime_ms,
+            mean_runtime_ms=mean_runtime_ms,
+            runtime_std_ms=runtime_std_ms,
+            cv=cv,
+            run_count=run_count,
+            warmup_runs_discarded=warmup_runs if benchmark_mode else 0,
         )
 
 

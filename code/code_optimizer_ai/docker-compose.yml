@@ -1,0 +1,120 @@
+version: '3.8'
+
+services:
+  # Main application
+  code-optimizer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: code-optimizer-ai
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/code_optimizer
+      - REDIS_URL=redis://redis:6379/11
+      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-code_optimizer_ai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - API_AUTH_TOKEN=${API_AUTH_TOKEN}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - code-optimizer-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    container_name: code-optimizer-postgres
+    environment:
+      - POSTGRES_DB=code_optimizer
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - code-optimizer-network
+    restart: unless-stopped
+
+  # Redis for caching and real-time data
+  redis:
+    image: redis:7-alpine
+    container_name: code-optimizer-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - code-optimizer-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+
+  # Celery worker for background tasks
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: code-optimizer-worker
+    command: celery -A core.celery_app worker --loglevel=info
+    environment:
+      - DEBUG=false
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/code_optimizer
+      - REDIS_URL=redis://redis:6379/11
+      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-code_optimizer_ai}
+      - BROKER_URL=redis://redis:6379/12
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - code-optimizer-network
+    restart: unless-stopped
+
+  # Celery beat scheduler
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: code-optimizer-scheduler
+    command: celery -A core.celery_app beat --loglevel=info
+    environment:
+      - DEBUG=false
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/code_optimizer
+      - REDIS_URL=redis://redis:6379/11
+      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-code_optimizer_ai}
+      - BROKER_URL=redis://redis:6379/12
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - code-optimizer-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  code-optimizer-network:
+    driver: bridge

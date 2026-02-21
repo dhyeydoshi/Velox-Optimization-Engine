@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     API_AUTH_TOKEN: Optional[str] = Field(default=None)
     REQUIRE_AUTH_TOKEN: bool = Field(default=False, validation_alias="REQUIRE_AUTH_TOKEN")
     ENABLE_API_DOCS: bool = Field(default=False, validation_alias="ENABLE_API_DOCS")
+    FEATURE_EVOLUTIONARY_SEARCH: bool = Field(
+        default=False,
+        validation_alias="FEATURE_EVOLUTIONARY_SEARCH",
+    )
     
     # Database
     DATABASE_URL: str = Field(

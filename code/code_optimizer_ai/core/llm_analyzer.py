@@ -1,5 +1,6 @@
 import asyncio
 import json
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,6 +10,7 @@ from langchain_core.prompts import PromptTemplate
 
 from code.code_optimizer_ai.config.settings import settings
 from code.code_optimizer_ai.core.llm_gateway import LLMGateway
+from code.code_optimizer_ai.evolutionary.constants import FamilyTag
 from code.code_optimizer_ai.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,6 +28,8 @@ class CodeAnalysisResult:
     best_practices_violations: List[str]
     confidence_score: float
     processing_time: float
+    hotspot_embedding: Optional[List[float]] = None
+    family_seed_tags: Optional[List[str]] = None
 
 
 @dataclass
@@ -205,6 +209,54 @@ Rules:
             logger.error("Failed to parse JSON response", error=str(exc))
             return {}
 
+    @staticmethod
+    def _deterministic_hotspot_embedding(payload: str, dim: int = 768) -> List[float]:
+        # Cheap deterministic encoder for seam compatibility in Phase A.
+        values: List[float] = []
+        counter = 0
+        normalized_payload = payload or ""
+        while len(values) < dim:
+            digest = hashlib.sha256(f"{normalized_payload}:{counter}".encode("utf-8")).digest()
+            for idx in range(0, len(digest), 2):
+                pair = digest[idx : idx + 2]
+                if len(pair) < 2:
+                    continue
+                unit = int.from_bytes(pair, byteorder="big", signed=False) / 65535.0
+                values.append((unit * 2.0) - 1.0)
+                if len(values) >= dim:
+                    break
+            counter += 1
+        return values
+
+    @staticmethod
+    def _infer_family_seed_tags(
+        performance_bottlenecks: List[str],
+        optimization_opportunities: List[str],
+        security_issues: List[str],
+    ) -> List[str]:
+        text = " ".join(
+            list(performance_bottlenecks or [])
+            + list(optimization_opportunities or [])
+            + list(security_issues or [])
+        ).lower()
+
+        tag_rules = (
+            (FamilyTag.DATA_STRUCTURE.value, ("dict", "set", "hash", "lookup", "list")),
+            (FamilyTag.LOOP_RESTRUCTURE.value, ("loop", "nested", "iteration", "comprehension")),
+            (FamilyTag.VECTORIZATION.value, ("vector", "numpy", "broadcast")),
+            (FamilyTag.CACHING.value, ("cache", "memo", "recompute", "reuse")),
+            (FamilyTag.PARALLELIZATION.value, ("parallel", "concurrent", "thread", "process", "async")),
+            (FamilyTag.ALGORITHMIC.value, ("algorithm", "complexity", "o(", "search", "sort")),
+            (FamilyTag.IO_BATCHING.value, ("i/o", "io", "database", "network", "batch", "query")),
+            (FamilyTag.MEMORY_LAYOUT.value, ("memory", "allocation", "buffer", "object churn")),
+        )
+
+        matched: List[str] = []
+        for tag, keywords in tag_rules:
+            if any(keyword in text for keyword in keywords):
+                matched.append(tag)
+        return matched
+
     async def _invoke_json(self, prompt: str, *, trace_id: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         response = await self.gateway.ainvoke(
             [
@@ -252,6 +304,25 @@ Rules:
                 model=trace.get("model"),
                 provider=trace.get("provider"),
             )
+
+            family_seed_tags = self._infer_family_seed_tags(
+                analysis_data.get("performance_bottlenecks", []),
+                analysis_data.get("optimization_opportunities", []),
+                analysis_data.get("security_issues", []),
+            )
+            embedding_payload = json.dumps(
+                {
+                    "code": code,
+                    "file_path": file_path,
+                    "identifier": identifier,
+                    "semantic_summary": analysis_data.get("semantic_summary", ""),
+                    "performance_bottlenecks": analysis_data.get("performance_bottlenecks", []),
+                    "optimization_opportunities": analysis_data.get("optimization_opportunities", []),
+                    "security_issues": analysis_data.get("security_issues", []),
+                },
+                sort_keys=True,
+            )
+
             return CodeAnalysisResult(
                 semantic_summary=analysis_data.get("semantic_summary", ""),
                 performance_bottlenecks=analysis_data.get("performance_bottlenecks", []),
@@ -262,6 +333,8 @@ Rules:
                 best_practices_violations=analysis_data.get("best_practices_violations", []),
                 confidence_score=self._float(analysis_data.get("confidence_score"), 0.0),
                 processing_time=processing_time,
+                hotspot_embedding=self._deterministic_hotspot_embedding(embedding_payload),
+                family_seed_tags=family_seed_tags or None,
             )
         except Exception as exc:
             logger.error("Code analysis failed", error=str(exc), file_path=file_path)
@@ -275,6 +348,8 @@ Rules:
                 best_practices_violations=[],
                 confidence_score=0.0,
                 processing_time=(datetime.now() - start_time).total_seconds(),
+                hotspot_embedding=None,
+                family_seed_tags=None,
             )
 
     async def generate_optimizations(
