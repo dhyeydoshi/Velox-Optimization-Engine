@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -34,6 +35,7 @@ class EvaluationResultV2:
     static_quality_score: float
     composite_score: Optional[float]
     error: Optional[str]
+    wall_clock_duration_ms: Optional[float] = None
 
 
 class EvaluationHarness:
@@ -55,6 +57,7 @@ class EvaluationHarness:
 
         results: List[EvaluationResultV2] = []
         for candidate in candidates:
+            eval_started = time.perf_counter()
             validation = await self.sandbox_client.validate_candidate(
                 original_code=candidate.original_code,
                 candidate_code=candidate.code_patch,
@@ -65,6 +68,7 @@ class EvaluationHarness:
                 benchmark_runs=benchmark_runs,
                 warmup_runs=warmup_runs,
             )
+            eval_duration_ms = (time.perf_counter() - eval_started) * 1000.0
             gate = evaluate_validation_gates(
                 validation,
                 min_run_count=benchmark_runs,
@@ -111,6 +115,7 @@ class EvaluationHarness:
                     static_quality_score=quality,
                     composite_score=composite_score,
                     error=validation.error,
+                    wall_clock_duration_ms=eval_duration_ms,
                 )
             )
 

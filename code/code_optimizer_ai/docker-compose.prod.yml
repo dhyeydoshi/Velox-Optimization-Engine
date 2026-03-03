@@ -1,0 +1,39 @@
+services:
+  api:
+    build:
+      target: production
+    ports:
+      - "${API_BIND_HOST:-127.0.0.1}:${API_HOST_PORT:-8000}:8000"
+    environment:
+      DEBUG: "false"
+      LOG_LEVEL: ${LOG_LEVEL:-WARN}
+      ENABLE_API_DOCS: "false"
+      REQUIRE_AUTH_TOKEN: "true"
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:?Set API_AUTH_TOKEN for production}
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY for production}
+      ENVIRONMENT: "production"
+      DB_HOST: ${DB_HOST:?Set DB_HOST for production}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_USER: ${DB_USER:?Set DB_USER for production}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD for production}
+      DB_NAME: ${DB_NAME:?Set DB_NAME for production}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL for production}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      FEATURE_EVOLUTIONARY_SEARCH: ${FEATURE_EVOLUTIONARY_SEARCH:-true}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+
+  postgres:
+    environment:
+      POSTGRES_DB: ${DB_NAME:?Set DB_NAME for production}
+      POSTGRES_USER: ${DB_USER:?Set DB_USER for production}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD for production}
+
+  redis:
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000", "--maxmemory-policy", "allkeys-lru"]

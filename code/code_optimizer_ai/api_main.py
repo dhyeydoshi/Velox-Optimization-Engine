@@ -51,6 +51,7 @@ from code.code_optimizer_ai.ml.training_runner import (
 )
 from code.code_optimizer_ai.config.settings import settings
 from code.code_optimizer_ai.config.evolutionary import PHASE_A_MAX_SUGGESTIONS
+from code.code_optimizer_ai.evolutionary.tier_config import TIER_CONFIGS, validate_tier
 from code.code_optimizer_ai.utils.logger import get_logger
 from code.code_optimizer_ai.utils.paths import parse_csv, allowed_code_roots
 
@@ -953,6 +954,7 @@ class V2OptimizeRequest(BaseModel):
     max_suggestions: int = Field(default=PHASE_A_MAX_SUGGESTIONS, ge=1, le=3)
     run_unit_tests: bool = False
     unit_test_command: Optional[str] = None
+    optimization_tier: str = Field(default="standard")
 
 
 class V2Suggestion(BaseModel):
@@ -983,6 +985,8 @@ class V2OptimizeResponse(BaseModel):
     latency_ms: int
     candidate_count: int
     evaluated_count: int
+    optimization_tier: Optional[str] = None
+    evolution_trace: Optional[List[Dict[str, Any]]] = None
 
 
 class V2RepositoryOptimizeRequest(BaseModel):
@@ -994,6 +998,7 @@ class V2RepositoryOptimizeRequest(BaseModel):
     max_suggestions_per_file: int = Field(default=PHASE_A_MAX_SUGGESTIONS, ge=1, le=3)
     run_unit_tests: bool = False
     unit_test_command: Optional[str] = None
+    optimization_tier: str = Field(default="standard")
 
 
 class V2RepositoryOptimizeFileResult(BaseModel):
@@ -1592,6 +1597,10 @@ async def optimize_code_v2(
                 status_code=400,
                 detail="Overriding unit_test_command via API is disabled",
             )
+        try:
+            validate_tier(request.optimization_tier)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         representative_input = _normalize_representative_input(request.representative_input)
 
@@ -1628,6 +1637,7 @@ async def optimize_code_v2(
                 if settings.ENABLE_API_UNIT_TEST_COMMAND_OVERRIDE
                 else None
             ),
+            optimization_tier=request.optimization_tier,
         )
         return V2OptimizeResponse(**result)
     except HTTPException:
@@ -1652,6 +1662,10 @@ async def optimize_repository_v2(
                 status_code=400,
                 detail="Overriding unit_test_command via API is disabled",
             )
+        try:
+            validate_tier(request.optimization_tier)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         representative_input = _normalize_representative_input(request.representative_input)
         clone_dir = await asyncio.to_thread(
@@ -1682,6 +1696,7 @@ async def optimize_repository_v2(
                 max_suggestions=request.max_suggestions_per_file,
                 run_unit_tests=request.run_unit_tests,
                 unit_test_command=unit_cmd,
+                optimization_tier=request.optimization_tier,
                 analysis_static_metrics={
                     "project_total_files": scan_result.scanned_files,
                     "repository_url": request.repo_url,

@@ -18,6 +18,14 @@ class GenerationPath(str, Enum):
     AST_HEURISTIC = "AST_HEURISTIC"
     LLM_TEMPERATURE = "LLM_TEMPERATURE"
     LLM_CRITIQUE_REFINE = "LLM_CRITIQUE_REFINE"
+    LLM_RAG_GUIDED = "LLM_RAG_GUIDED"
+    LLM_MUTATION = "LLM_MUTATION"
+
+
+class OptimizationTier(str, Enum):
+    STANDARD = "standard"
+    EXTENDED = "extended"
+    DEEP = "deep"
 
 
 class StoppingReason(str, Enum):

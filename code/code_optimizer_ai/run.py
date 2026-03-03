@@ -37,6 +37,33 @@ def parse_host_port(url: str) -> Optional[Tuple[str, int]]:
     return None
 
 
+def resolve_db_wait_target() -> Optional[Tuple[str, int]]:
+    """
+    Resolve database readiness host/port using the same DB_* strategy as settings.
+    Falls back to DATABASE_URL for backward compatibility.
+    """
+    db_host = os.getenv("DB_HOST", "").strip()
+    db_port_raw = os.getenv("DB_PORT", "").strip()
+
+    if db_host:
+        if not db_port_raw:
+            return db_host, 5432
+        try:
+            return db_host, int(db_port_raw)
+        except ValueError:
+            log_warn(f"Invalid DB_PORT='{db_port_raw}'; defaulting to 5432 for wait check")
+            return db_host, 5432
+
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        parsed = parse_host_port(db_url)
+        if parsed:
+            return parsed
+        log_warn("DATABASE_URL found but host/port could not be parsed; skipping wait")
+
+    return None
+
+
 def wait_for_service(name: str, host: str, port: int, timeout: int = 30) -> bool:
     log_info(f"Waiting for {name} at {host}:{port} (timeout {timeout}s)")
     deadline = time.time() + timeout
@@ -82,13 +109,9 @@ def main() -> None:
 
     # Wait for dependencies in production
     if not debug:
-        db_url = os.getenv("DATABASE_URL")
-        if db_url:
-            parsed = parse_host_port(db_url)
-            if parsed:
-                wait_for_service("database", parsed[0], parsed[1], timeout=60)
-            else:
-                log_warn("DATABASE_URL found but host/port could not be parsed; skipping wait")
+        db_target = resolve_db_wait_target()
+        if db_target:
+            wait_for_service("database", db_target[0], db_target[1], timeout=60)
 
         redis_url = os.getenv("REDIS_URL")
         if redis_url:

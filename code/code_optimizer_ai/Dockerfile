@@ -1,49 +1,81 @@
-# Use Python 3.12 slim image
-FROM python:3.12-slim
+# syntax=docker/dockerfile:1.7
+ARG PYTHON_IMAGE=python:3.12-slim
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PIP_NO_CACHE_DIR=1
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+FROM ${PYTHON_IMAGE} AS builder
 
-# Set work directory
-WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    VENV_PATH=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}"
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+WORKDIR /build
+
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    curl \
-    git \
     libpq-dev \
+    libssl-dev \
+    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better Docker layer caching
-COPY requirements.txt .
+COPY requirements.txt ./
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m venv "${VENV_PATH}" && \
+    pip install --upgrade pip setuptools wheel && \
+    pip install --index-url https://download.pytorch.org/whl/cpu torch==2.8.0 && \
+    pip install -r requirements.txt && \
+    find "${VENV_PATH}" -type d -name '__pycache__' -exec rm -rf {} + && \
+    find "${VENV_PATH}" -type f -name '*.pyc' -delete && \
+    find "${VENV_PATH}" -type f -name '*.pyo' -delete
 
-# Copy application code
-COPY . .
 
-# Create necessary directories
-RUN mkdir -p /app/data /app/models /app/logs
+FROM ${PYTHON_IMAGE} AS production
 
-# Set permissions
-RUN chmod +x /app/run.sh
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    VENV_PATH=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}" \
+    PYTHONPATH="/app" \
+    APP_HOME=/app
 
-# Run as non-root user
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
-    && chown -R appuser:appgroup /app
+WORKDIR $APP_HOME
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini \
+    libpq5 \
+    libgomp1 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system appuser && useradd --system --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser
+
+COPY --from=builder "${VENV_PATH}" "${VENV_PATH}"
+COPY --chown=appuser:appuser . .
+
+RUN install -d -o appuser -g appuser /app/data /app/models /app/logs
+
 USER appuser
 
-# Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
 
-# Run the application
-CMD ["./run.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["python", "-m", "code.code_optimizer_ai.run"]
+
+
+FROM production AS development
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+USER appuser
+
+CMD ["uvicorn", "code.code_optimizer_ai.api_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app"]

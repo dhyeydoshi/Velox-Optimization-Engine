@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 from code.code_optimizer_ai.config.evolutionary import (
     CV_PENALTY_COEFFICIENT,
@@ -154,3 +154,10 @@ def compute_composite_score(
         code_size_delta_norm=size_norm,
         composite_score=float(score),
     )
+
+
+def best_composite_score(values: Sequence[Optional[float]]) -> float:
+    numeric = [float(value) for value in values if value is not None]
+    if not numeric:
+        return -1.0
+    return max(numeric)

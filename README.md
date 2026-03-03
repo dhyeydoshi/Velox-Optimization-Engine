@@ -169,6 +169,46 @@ redis-server --daemonize yes
 python -c "import asyncio, sys; from pathlib import Path; sys.path.insert(0, '.'); from code.code_optimizer_ai.database.migrate import create_database_schema; asyncio.run(create_database_schema())"
 ```
 
+**Recommended migration workflow (streamlined):**
+```bash
+# Base schema + additive migrations
+python -m code.code_optimizer_ai.database.migrate --migrate
+
+# Show migration status (applied/pending/checksum state)
+python -m code.code_optimizer_ai.database.migrate --status
+
+# Apply additive migrations only
+python -m code.code_optimizer_ai.database.migrate --up
+
+# Verify migration tracking/checksum integrity
+python -m code.code_optimizer_ai.database.migrate --verify
+
+# Roll back latest additive migration (or --steps N)
+python -m code.code_optimizer_ai.database.migrate --down --steps 1
+```
+
+Legacy alias kept for compatibility:
+```bash
+python -m code.code_optimizer_ai.database.migrate --migrate-v2
+```
+
+### 2A. Docker Development Bootstrap (Phase A)
+
+Use the helper script to start the dev stack, apply additive migrations, and verify `pgvector` + Phase A schema:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_phase_a_dev.ps1
+```
+
+```bash
+bash ./scripts/start_phase_a_dev.sh
+```
+
+Optional flags:
+- `--recreate-volumes` / `-RecreateVolumes` to reset containers and volumes.
+- `--no-build` / `-NoBuild` to skip image rebuild.
+- `--skip-migrations` / `-SkipMigrations` to only start containers.
+
 ### 3. Configure LLM (Choose One)
 
 **Option A: OpenRouter (Recommended)**

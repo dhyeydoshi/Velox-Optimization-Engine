@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from code.code_optimizer_ai.core.llm_analyzer import CodeAnalysisResult, CodeAnalyzerLLM
+from code.code_optimizer_ai.evolutionary.diff_parser import apply_diff_patches, parse_search_replace_blocks
+from code.code_optimizer_ai.evolutionary.family_classifier import classify_family_tag
 from code.code_optimizer_ai.evolutionary.constants import FamilyTag, GenerationPath
 
 
@@ -38,6 +40,7 @@ class CandidateRecord:
     original_code: str
     code_patch: str
     created_at: str
+    embedding: Optional[List[float]] = None
     provenance: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -73,6 +76,8 @@ class PopulationGenerator:
         original_code: str,
         code_patch: str,
         model_id: Optional[str],
+        generation_number: int = 0,
+        embedding: Optional[List[float]] = None,
         parent_id: Optional[str] = None,
         provenance: Optional[Dict[str, Any]] = None,
     ) -> CandidateRecord:
@@ -81,7 +86,7 @@ class PopulationGenerator:
             request_id=request_id,
             generation_path=generation_path,
             family_tag=family_tag,
-            generation_number=0,
+            generation_number=generation_number,
             parent_id=parent_id,
             model_id=model_id,
             prompt_template_version=prompt_template_version,
@@ -89,6 +94,7 @@ class PopulationGenerator:
             original_code=original_code,
             code_patch=code_patch,
             created_at=datetime.utcnow().isoformat(),
+            embedding=embedding,
             provenance=provenance or {},
         )
 
@@ -118,6 +124,7 @@ class PopulationGenerator:
             original_code=original_code,
             code_patch=code_patch,
             model_id=None,
+            embedding=analysis.hotspot_embedding,
             provenance={"strategy": "ast_heuristic"},
         )
 
@@ -136,22 +143,38 @@ class PopulationGenerator:
         )
         records: List[CandidateRecord] = []
         for suggestion in suggestions[: max(1, max_candidates)]:
-            patch = suggestion.optimized_code or original_code
+            raw_output = suggestion.optimized_code or original_code
+            parsed_patches = parse_search_replace_blocks(raw_output)
+            if parsed_patches:
+                maybe_applied = apply_diff_patches(original_code, parsed_patches)
+                patch = maybe_applied if maybe_applied is not None else raw_output
+            else:
+                patch = raw_output
             trace = suggestion.model_trace or {}
+            family_tag = self._category_to_family_tag(suggestion.category, analysis)
+            classifier_tag = classify_family_tag(
+                raw_output,
+                GenerationPath.LLM_TEMPERATURE,
+                analysis.family_seed_tags or [],
+            )
+            if classifier_tag:
+                family_tag = classifier_tag
             records.append(
                 self._build_candidate(
                     request_id=request_context.request_id,
                     generation_path=GenerationPath.LLM_TEMPERATURE,
-                    family_tag=self._category_to_family_tag(suggestion.category, analysis),
+                    family_tag=family_tag,
                     prompt_template_version=request_context.prompt_template_version,
                     transform_lib_version=request_context.transform_lib_version,
                     original_code=original_code,
                     code_patch=patch,
                     model_id=trace.get("model"),
+                    embedding=analysis.hotspot_embedding,
                     provenance={
                         "strategy": "llm_temperature",
                         "provider": trace.get("provider"),
                         "category": suggestion.category,
+                        "is_diff_patch": bool(parsed_patches),
                     },
                 )
             )
@@ -183,6 +206,7 @@ class PopulationGenerator:
             original_code=base_candidate.code_patch,
             code_patch=patch,
             model_id=trace.get("model"),
+            embedding=analysis.hotspot_embedding,
             parent_id=base_candidate.candidate_id,
             provenance={
                 "strategy": "llm_critique_refine",

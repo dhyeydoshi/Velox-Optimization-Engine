@@ -1,7 +1,9 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote_plus
 
+from jwt import encode
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import logging
@@ -29,17 +31,24 @@ class Settings(BaseSettings):
     REQUIRE_AUTH_TOKEN: bool = Field(default=False, validation_alias="REQUIRE_AUTH_TOKEN")
     ENABLE_API_DOCS: bool = Field(default=False, validation_alias="ENABLE_API_DOCS")
     FEATURE_EVOLUTIONARY_SEARCH: bool = Field(
-        default=False,
+        default=True,
         validation_alias="FEATURE_EVOLUTIONARY_SEARCH",
     )
     
-    # Database
-    DATABASE_URL: str = Field(
-        default="postgresql://user:password@localhost:5432/code_optimizer",
-        validation_alias="DATABASE_URL"
-    )
+    # Database Configuration
+    DB_HOST: str = Field(default="localhost", validation_alias="DB_HOST")
+    DB_PORT: int = Field(default=5432, validation_alias="DB_PORT")
+    DB_USER: str = Field(default="postgres", validation_alias="DB_USER")
+    DB_PASSWORD: str = Field(default="password", validation_alias="DB_PASSWORD")
+    DB_NAME: str = Field(default="code_optimizer", validation_alias="DB_NAME")
+
+    @property
+    def DATABASE_URL(self) -> str:
+        encoded_password = quote_plus(self.DB_PASSWORD)
+        return f"postgresql://{self.DB_USER}:{encoded_password}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
     REDIS_URL: str = Field(
-        default="redis://localhost:6379/11",
+        default="redis://redis:6379/11",
         validation_alias="REDIS_URL"
     )
     REDIS_KEY_PREFIX: str = Field(
@@ -58,11 +67,11 @@ class Settings(BaseSettings):
         validation_alias="OPENROUTER_BASE_URL",
     )
     OPENROUTER_PRIMARY_MODEL: str = Field(
-        default="openai/gpt-4o-mini",
+        default="openai/gpt-5-mini",
         validation_alias="OPENROUTER_PRIMARY_MODEL",
     )
     OPENROUTER_SECONDARY_MODEL: str = Field(
-        default="anthropic/claude-3.5-sonnet",
+        default="anthropic/claude-4.5-sonnet",
         validation_alias="OPENROUTER_SECONDARY_MODEL",
     )
     OLLAMA_BASE_URL: str = Field(default="http://localhost:11434", validation_alias="OLLAMA_BASE_URL")
@@ -157,8 +166,6 @@ class Settings(BaseSettings):
     
     # Logging
     LOG_LEVEL: str = Field(default="INFO", validation_alias="LOG_LEVEL")
-    ENABLE_SENTRY: bool = Field(default=False, validation_alias="ENABLE_SENTRY")
-    SENTRY_DSN: Optional[str] = Field(default=None, validation_alias="SENTRY_DSN")
 
 
 @lru_cache()

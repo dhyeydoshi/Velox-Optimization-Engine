@@ -21,6 +21,7 @@ from code.code_optimizer_ai.evolutionary.constants import BottleneckStatus
 from code.code_optimizer_ai.database.connection import db_manager
 from code.code_optimizer_ai.evaluation.harness import EvaluationHarness, EvaluationResultV2
 from code.code_optimizer_ai.evolutionary.population import CandidateRecord, PopulationGenerator
+from code.code_optimizer_ai.evolutionary.tier_config import TIER_CONFIGS, validate_tier
 from code.code_optimizer_ai.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -255,6 +256,7 @@ class EvolutionaryPipeline:
         representative_input: Optional[List[str]],
         objective_weights: Optional[Dict[str, float]],
         max_suggestions: Optional[int],
+        time_budget_ms: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> RequestContext:
         runtime_weight, memory_weight, quality_weight = self._normalize_weights(objective_weights)
@@ -272,7 +274,7 @@ class EvolutionaryPipeline:
             benchmark_runs=max(BENCHMARK_RUN_COUNT_MIN, int(BENCHMARK_RUN_COUNT_MIN)),
             warmup_runs=max(BENCHMARK_WARMUP_RUNS, int(BENCHMARK_WARMUP_RUNS)),
             max_suggestions=max(1, min(int(max_suggestions or PHASE_A_MAX_SUGGESTIONS), 3)),
-            request_time_budget_ms=REQUEST_TIME_BUDGET_MS,
+            request_time_budget_ms=max(1, int(time_budget_ms or REQUEST_TIME_BUDGET_MS)),
             prompt_template_version=PHASE_A_PROMPT_TEMPLATE_VERSION,
             transform_lib_version=PHASE_A_TRANSFORM_LIB_VERSION,
             metadata=metadata or {},
@@ -322,16 +324,22 @@ class EvolutionaryPipeline:
         max_suggestions: Optional[int],
         run_unit_tests: bool,
         unit_test_command: Optional[str],
+        optimization_tier: str = "standard",
         analysis_static_metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         started = time.perf_counter()
+        tier_config = validate_tier(optimization_tier)
         context = self.build_request_context(
             request_scope="inline",
             file_path=file_path,
             representative_input=representative_input,
             objective_weights=objective_weights,
             max_suggestions=max_suggestions,
-            metadata={"analysis_static_metrics": bool(analysis_static_metrics)},
+            time_budget_ms=tier_config.time_budget_ms,
+            metadata={
+                "analysis_static_metrics": bool(analysis_static_metrics),
+                "optimization_tier": optimization_tier,
+            },
         )
         await self._store_optimization_request(context, status="running")
 
@@ -347,7 +355,10 @@ class EvolutionaryPipeline:
                 request_context=context,
                 original_code=code,
                 analysis=analysis,
-                max_candidates=context.max_suggestions + 1,
+                max_candidates=max(
+                    tier_config.population_size_min,
+                    min(tier_config.population_size_max, context.max_suggestions + 1),
+                ),
             )
             evaluations = await self.evaluation_harness.evaluate_candidates(
                 request_context=context,
@@ -389,6 +400,7 @@ class EvolutionaryPipeline:
             payload = {
                 "request_id": context.request_id,
                 "phase": "A",
+                "optimization_tier": optimization_tier,
                 "suggestions": top_suggestions,
                 "bottleneck_status": BottleneckStatus.NO_CHANGE.value,
                 "representative_input_warning": context.representative_input_warning,
@@ -396,6 +408,13 @@ class EvolutionaryPipeline:
                 "latency_ms": latency_ms,
                 "candidate_count": len(candidates),
                 "evaluated_count": len(evaluations),
+                "evolution_trace": [
+                    {
+                        "generation": 0,
+                        "candidate_count": len(candidates),
+                        "evaluated_count": len(evaluations),
+                    }
+                ],
             }
             await self._store_optimization_request(
                 context,
@@ -428,6 +447,7 @@ class EvolutionaryPipeline:
             "benchmark_runs_min": BENCHMARK_RUN_COUNT_MIN,
             "warmup_runs": BENCHMARK_WARMUP_RUNS,
             "time_budget_ms": REQUEST_TIME_BUDGET_MS,
+            "available_tiers": sorted(TIER_CONFIGS.keys()),
         }
 
 
